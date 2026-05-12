@@ -1,10 +1,7 @@
 use crate::{
     data_types::DeviceEvent,
     error::FlashResult,
-    traits::{
-        DeviceEnumerator,
-        DeviceUnmounter,
-    },
+    traits::{DeviceEjector, DeviceEnumerator, DeviceUnmounter, DeviceWriter},
 };
 
 pub struct LinuxDeviceEnumerator;
@@ -29,6 +26,21 @@ impl DeviceUnmounter for LinuxDeviceUnmounter {
     }
 
     fn is_fully_unmounted(&self, device: &crate::data_types::BlockDevice) -> FlashResult<bool> {
+        todo!()
+    }
+}
+impl DeviceWriter for LinuxDeviceWriter {
+    type Handle;
+
+    fn open_for_writing(
+        &self,
+        device: &crate::data_types::BlockDevice,
+    ) -> FlashResult<Self::Handle> {
+        todo!()
+    }
+}
+impl DeviceEjector for LinuxDeviceEjector {
+    fn eject(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
         todo!()
     }
 }
