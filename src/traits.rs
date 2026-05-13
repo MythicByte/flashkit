@@ -4,7 +4,6 @@ use crate::{
         DeviceEvent,
         FlashPhase,
         FlashProgress,
-        MountedPartition,
     },
     error::{
         FlashError,
@@ -57,8 +56,8 @@ pub trait DeviceEnumerator {
 ///   macOS   → DADiskUnmount() via DiskArbitration
 ///   Windows → FSCTL_LOCK_VOLUME + FSCTL_DISMOUNT_VOLUME
 pub trait DeviceUnmounter {
-    /// Unmount all partitions. Returns which partitions were unmounted.
-    fn unmount_all(&self, device: &BlockDevice) -> FlashResult<Vec<MountedPartition>>;
+    /// Unmount all partitions.
+    fn unmount_all(&self, device: &BlockDevice) -> FlashResult<()>;
 
     /// Check if any partition is still mounted
     fn is_fully_unmounted(&self, device: &BlockDevice) -> FlashResult<bool>;
@@ -117,7 +116,6 @@ where
         if !self.unmounter.is_fully_unmounted(device)? {
             return Err(FlashError::DeviceBusy {
                 path: device.path.clone(),
-                mount_point: device.partitions[0].mount_point.clone(),
             });
         }
 
