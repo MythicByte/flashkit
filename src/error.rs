@@ -13,8 +13,8 @@ pub enum FlashError {
     #[error("Device not found: {0}")]
     DeviceNotFound(PathBuf),
 
-    #[error("Device is busy: {path} mounted at {mount_point}")]
-    DeviceBusy { path: PathBuf, mount_point: PathBuf },
+    #[error("Device is busy: {path} ")]
+    DeviceBusy { path: PathBuf },
 
     #[error("Unmount failed for {device}: {reason}")]
     UnmountFailed { device: PathBuf, reason: String },
@@ -35,4 +35,7 @@ pub enum FlashError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    ParseInt(#[from] std::num::ParseIntError),
 }

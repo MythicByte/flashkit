@@ -11,8 +11,6 @@ pub struct BlockDevice {
     pub is_removable: bool,
     /// Check if its mounted
     pub is_mounted: bool,
-    /// Partitions currently mounted, with their mount points
-    pub partitions: Vec<MountedPartition>,
     /// Sector size
     pub sector_size: u16,
 }
@@ -41,6 +39,15 @@ pub enum FlashPhase {
     Done,
 }
 
+/// The Devices Size rounded
+#[derive(Debug, Clone, PartialEq)]
+pub enum Size {
+    Bytes(u64),
+    KiloByte(u64),
+    MegaByte(u64),
+    GigaByte(u64),
+}
+
 /// Events to devices
 #[derive(Debug)]
 pub enum DeviceEvent {
@@ -55,5 +62,18 @@ impl FlashProgress {
             bytes_per_sec: 0.0,
             phase,
         }
+    }
+}
+/// generates from bytes rounded biggest value
+pub(crate) fn calculate_size_from_bytes(bytes_size: u64) -> Size {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    match bytes_size {
+        b if b >= GB => Size::GigaByte(b.saturating_div(GB)),
+        b if b >= MB => Size::MegaByte(b.saturating_div(MB)),
+        b if b >= KB => Size::KiloByte(b.saturating_div(KB)),
+        b => Size::Bytes(b),
     }
 }
