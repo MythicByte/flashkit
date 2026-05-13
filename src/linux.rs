@@ -1,16 +1,27 @@
 use crate::{
     data_types::DeviceEvent,
     error::FlashResult,
-    traits::{DeviceEjector, DeviceEnumerator, DeviceUnmounter, DeviceWriter},
+    traits::{
+        DeviceEjector,
+        DeviceEnumerator,
+        DeviceUnmounter,
+        DeviceWriter,
+        ImageSource,
+        RawWriteHandle,
+    },
 };
 
+pub struct LinuxRawWriteHandle;
 pub struct LinuxDeviceEnumerator;
 pub struct LinuxDeviceUnmounter;
 pub struct LinuxDeviceWriter;
 pub struct LinuxDeviceEjector;
+pub struct LinuxImageSource;
 
 impl DeviceEnumerator for LinuxDeviceEnumerator {
     fn list_devices(&self) -> crate::error::FlashResult<Vec<crate::data_types::BlockDevice>> {
+        const SYS_PATH: &str = "/sys/block/";
+        let block_devices_found = std::fs::read_dir(SYS_PATH)?;
         todo!()
     }
     fn watch_devices(&self) -> FlashResult<std::sync::mpsc::Receiver<DeviceEvent>> {
@@ -29,6 +40,27 @@ impl DeviceUnmounter for LinuxDeviceUnmounter {
         todo!()
     }
 }
+impl RawWriteHandle for LinuxRawWriteHandle {
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
+        todo!()
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<()> {
+        todo!()
+    }
+
+    fn flush_to_disk(&mut self) -> FlashResult<()> {
+        todo!()
+    }
+
+    fn sector_size(&self) -> u64 {
+        todo!()
+    }
+
+    fn size_bytes(&self) -> FlashResult<u64> {
+        todo!()
+    }
+}
 impl DeviceWriter for LinuxDeviceWriter {
     type Handle;
 
@@ -41,6 +73,15 @@ impl DeviceWriter for LinuxDeviceWriter {
 }
 impl DeviceEjector for LinuxDeviceEjector {
     fn eject(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
+        todo!()
+    }
+}
+impl ImageSource for LinuxImageSource {
+    fn uncompressed_size(&self) -> Option<u64> {
+        todo!()
+    }
+
+    fn read_chunk(&mut self, buf: &mut [u8]) -> FlashResult<usize> {
         todo!()
     }
 }
