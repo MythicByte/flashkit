@@ -1,13 +1,8 @@
 use crate::{
-    data_types::DeviceEvent,
+    data_types::{BlockDevice, DeviceEvent},
     error::FlashResult,
     traits::{
-        DeviceEjector,
-        DeviceEnumerator,
-        DeviceUnmounter,
-        DeviceWriter,
-        ImageSource,
-        RawWriteHandle,
+        DeviceEjector, DeviceEnumerator, DeviceUnmounter, DeviceWriter, ImageSource, RawWriteHandle,
     },
 };
 
@@ -22,7 +17,20 @@ impl DeviceEnumerator for LinuxDeviceEnumerator {
     fn list_devices(&self) -> crate::error::FlashResult<Vec<crate::data_types::BlockDevice>> {
         const SYS_PATH: &str = "/sys/block/";
         let block_devices_found = std::fs::read_dir(SYS_PATH)?;
-        todo!()
+        Ok(block_devices_found
+            .filter_map(|entry| match entry {
+                Ok(correct_entry) => Some(BlockDevice {
+                    path: correct_entry.path(),
+                    name: correct_entry.file_name(),
+                    size_bytes: todo!(),
+                    is_removable: todo!(),
+                    is_mounted: todo!(),
+                    partitions: todo!(),
+                    sector_size: todo!(),
+                }),
+                Err(_) => None,
+            })
+            .collect())
     }
     fn watch_devices(&self) -> FlashResult<std::sync::mpsc::Receiver<DeviceEvent>> {
         todo!()
