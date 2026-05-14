@@ -8,12 +8,6 @@
 //! - [ ] Macos
 //!
 
-use crate::linux::{
-    LinuxDeviceEjector,
-    LinuxDeviceEnumerator,
-    LinuxDeviceUnmounter,
-    LinuxDeviceWriter,
-};
 #[cfg(target_os = "linux")]
 use crate::traits::Flasher;
 
