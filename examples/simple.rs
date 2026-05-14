@@ -18,5 +18,5 @@ fn main() {
     info!("Startup");
     let flasher = flash();
     let devices = flasher.list_devices();
-    println!("{:?}", devices);
+    println!("{:#?}", devices);
 }
