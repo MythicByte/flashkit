@@ -22,6 +22,8 @@ pub enum FlashError {
     #[error("Write failed at offset {offset}: {source}")]
     WriteFailed { offset: u64, source: std::io::Error },
 
+    #[error("Get exclusiv file lock failed for {device}: {reason}")]
+    FileLockFailed { device: PathBuf, reason: String },
     #[error(
         "Verification failed — SHA256 mismatch with {failed_hash_hex} should have matched {expected_hex}"
     )]
@@ -40,7 +42,4 @@ pub enum FlashError {
 
     #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
-
-    #[error("integer conversion failed: {0}")]
-    TryFromInt(#[from] std::num::TryFromIntError),
 }

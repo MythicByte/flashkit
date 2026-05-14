@@ -13,7 +13,10 @@ use std::{
 };
 
 use rustix::{
-    fs::OFlags,
+    fs::{
+        FlockOperation,
+        OFlags,
+    },
     mount::UnmountFlags,
     path::Arg,
 };
@@ -211,9 +214,22 @@ impl DeviceWriter for LinuxDeviceWriter {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(OFlags::EXCL.bits().try_into()?)
             .open(device.path.clone())
             .map_err(|_| FlashError::InsufficientPrivileges)?;
+        if let Err(error) = rustix::fs::flock(&file, FlockOperation::LockExclusive) {
+            let error_back = match error.kind() {
+                std::io::ErrorKind::NotFound => FlashError::DeviceNotFound(device.path.clone()),
+                std::io::ErrorKind::PermissionDenied => FlashError::InsufficientPrivileges,
+                std::io::ErrorKind::ResourceBusy => FlashError::DeviceBusy {
+                    path: device.path.clone(),
+                },
+                error @ _ => FlashError::FileLockFailed {
+                    device: device.path.clone(),
+                    reason: error.to_string(),
+                },
+            };
+            return Err(error_back);
+        }
 
         Ok(LinuxRawWriteHandle {
             file,
