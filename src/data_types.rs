@@ -64,16 +64,22 @@ impl FlashProgress {
         }
     }
 }
+impl BlockDevice {
+    /// Gets the byte size and rounded down
+    pub fn get_sizes(&self) -> Size {
+        calculate_size_from_bytes(self.size_bytes)
+    }
+}
 /// generates from bytes rounded biggest value
-pub(crate) fn calculate_size_from_bytes(bytes_size: u64) -> Size {
+pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const GB: u64 = 1024 * MB;
 
     match bytes_size {
-        b if b >= GB => Size::GigaByte(b.saturating_div(GB)),
-        b if b >= MB => Size::MegaByte(b.saturating_div(MB)),
-        b if b >= KB => Size::KiloByte(b.saturating_div(KB)),
+        b if b >= GB => Size::GigaByte(b.div_ceil(GB)),
+        b if b >= MB => Size::MegaByte(b.div_ceil(MB)),
+        b if b >= KB => Size::KiloByte(b.div_ceil(KB)),
         b => Size::Bytes(b),
     }
 }
