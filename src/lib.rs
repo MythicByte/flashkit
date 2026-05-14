@@ -3,7 +3,7 @@
 //! **Cross Platform Support**
 //!
 //! # Supported
-//! - [ ] Linux
+//! - [x] Linux
 //! - [ ] Windows
 //! - [ ] Macos
 //!
@@ -18,20 +18,20 @@ use crate::linux::{
 use crate::traits::Flasher;
 
 /// Libary Data types
-pub(crate) mod data_types;
+pub mod data_types;
 /// Errors
-pub(crate) mod error;
+pub mod error;
 #[cfg(target_os = "linux")]
 /// Linux
-pub(crate) mod linux;
+pub mod linux;
 #[cfg(target_os = "macos")]
 /// Macos
-pub(crate) mod macos;
+pub mod macos;
 /// Generic Traits abstraction
-pub(crate) mod traits;
+pub mod traits;
 #[cfg(target_os = "windows")]
 /// Windows
-pub(crate) mod windows;
+pub mod windows;
 
 #[cfg(target_os = "linux")]
 use linux::{
