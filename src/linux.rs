@@ -294,7 +294,7 @@ fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashE
             .filter_map(|line| {
                 let mut lines = line.split_whitespace();
                 let device = lines.next()?;
-                if !device.contains(correct_device_path) {
+                if !device.starts_with(correct_device_path) {
                     return None;
                 };
                 let mount_point = lines.next()?;
