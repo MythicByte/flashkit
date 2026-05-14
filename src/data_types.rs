@@ -55,6 +55,7 @@ pub enum DeviceEvent {
     Removed(PathBuf),
 }
 impl FlashProgress {
+    #[must_use]
     pub fn phase(phase: FlashPhase) -> Self {
         FlashProgress {
             bytes_written: 0,
@@ -66,11 +67,13 @@ impl FlashProgress {
 }
 impl BlockDevice {
     /// Gets the byte size and rounded down
+    #[must_use]
     pub fn get_sizes(&self) -> Size {
         calculate_size_from_bytes(self.size_bytes)
     }
 }
 /// generates from bytes rounded biggest value
+#[must_use]
 pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;

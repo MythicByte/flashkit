@@ -54,6 +54,7 @@ use crate::traits::Flasher;
 pub type OsFlasher = Flasher<SysEnumerator, SysUnmounter, SysWriter, SysEjector>;
 
 /// Automatically creates a Flasher configured for the current operating system.
+#[must_use]
 pub fn flash() -> OsFlasher {
     Flasher::new(
         SysEnumerator,

@@ -5,18 +5,12 @@ use std::{
         OpenOptions,
     },
     io::Read,
-    os::unix::fs::{
-        FileExt,
-        OpenOptionsExt,
-    },
+    os::unix::fs::FileExt,
     path::PathBuf,
 };
 
 use rustix::{
-    fs::{
-        FlockOperation,
-        OFlags,
-    },
+    fs::FlockOperation,
     mount::UnmountFlags,
     path::Arg,
 };
@@ -160,6 +154,7 @@ impl DeviceEnumerator for LinuxDeviceEnumerator {
     //     todo!()
     // }
 }
+#[allow(clippy::redundant_pattern)]
 impl DeviceUnmounter for LinuxDeviceUnmounter {
     fn unmount_all(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
         rustix::mount::unmount(device.path.clone(), UnmountFlags::NOFOLLOW).map_err(|value| {
@@ -207,6 +202,7 @@ impl RawWriteHandle for LinuxRawWriteHandle {
 impl DeviceWriter for LinuxDeviceWriter {
     type Handle = LinuxRawWriteHandle;
 
+    #[allow(clippy::redundant_pattern)]
     fn open_for_writing(
         &self,
         device: &crate::data_types::BlockDevice,
@@ -242,7 +238,7 @@ impl DeviceEjector for LinuxDeviceEjector {
     /// check that safe to eject device
     fn eject(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
         let file = File::open(device.path.clone())?;
-        if let Err(_) = rustix::fs::fsync(file) {
+        if rustix::fs::fsync(file).is_err() {
             return Err(FlashError::SyncError);
         }
         Ok(())
@@ -254,7 +250,7 @@ impl<R: Read> ImageSource for LinuxImageSource<R> {
     }
 
     fn read_chunk(&mut self, buf: &mut [u8]) -> FlashResult<usize> {
-        self.reader.read(buf).map_err(|e| FlashError::Io(e))
+        self.reader.read(buf).map_err(FlashError::Io)
     }
     fn expected_hash(&self) -> Option<[u8; 32]> {
         self.expected_hash
