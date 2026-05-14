@@ -5,6 +5,7 @@ use thiserror::Error;
 pub type FlashResult<T> = Result<T, FlashError>;
 
 /// Errors
+#[allow(missing_docs)]
 #[derive(Debug, Error)]
 pub enum FlashError {
     #[error("Insufficient privileges — run as root or administrator")]

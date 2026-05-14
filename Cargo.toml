@@ -14,6 +14,12 @@ sysinfo = "0.39.0"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unused_must_use = "deny"
+
 [lints.clippy]
 all = "deny"
 indexing_slicing = "deny"

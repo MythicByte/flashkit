@@ -20,7 +20,10 @@ use tracing::{
 };
 
 use crate::{
-    data_types::BlockDevice,
+    data_types::{
+        BlockDevice,
+        MountedPartition,
+    },
     error::{
         FlashError,
         FlashResult,
@@ -34,20 +37,26 @@ use crate::{
         RawWriteHandle,
     },
 };
+/// Linux Raw File Handle
 #[derive(Debug)]
 pub struct LinuxRawWriteHandle {
     file: fs::File,
     phyisical_sector_size: u32,
     size_bytes: u64,
 }
+/// How to enumerate a device
 #[derive(Debug)]
 pub struct LinuxDeviceEnumerator;
+/// The unmounter implementation
 #[derive(Debug)]
 pub struct LinuxDeviceUnmounter;
+/// THe writer implementation
 #[derive(Debug)]
 pub struct LinuxDeviceWriter;
+/// how the disk is ejected
 #[derive(Debug)]
 pub struct LinuxDeviceEjector;
+/// How the file written is checked and information about it
 #[derive(Debug)]
 pub struct LinuxImageSource<R>
 where
@@ -172,7 +181,10 @@ impl DeviceUnmounter for LinuxDeviceUnmounter {
         })
     }
 
-    fn is_fully_unmounted(&self, device: &crate::data_types::BlockDevice) -> FlashResult<bool> {
+    fn is_fully_unmounted(
+        &self,
+        device: &crate::data_types::BlockDevice,
+    ) -> FlashResult<Option<Vec<MountedPartition>>> {
         mounted_status(device.path.clone())
     }
 }
@@ -258,7 +270,7 @@ impl<R: Read> ImageSource for LinuxImageSource<R> {
 }
 /// Check if mounted
 #[instrument(ret)]
-fn mounted_status(path: PathBuf) -> Result<bool, FlashError> {
+fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashError> {
     let path_selected = path
         .components()
         .nth(3)
@@ -277,16 +289,27 @@ fn mounted_status(path: PathBuf) -> Result<bool, FlashError> {
     let search_string_from_path = dev_path_search.to_str();
     warn!("{:?}", search_string_from_path);
     if let Some(correct_device_path) = search_string_from_path {
-        return Ok(mounted_devices.lines().any(|line| {
-            line.split_whitespace()
-                .next()
-                .iter()
-                .find(|x| x.starts_with(correct_device_path))
-                .is_some()
-        }));
+        let output: Vec<MountedPartition> = mounted_devices
+            .lines()
+            .filter_map(|line| {
+                let mut lines = line.split_whitespace();
+                let device = lines.next()?;
+                if !device.contains(correct_device_path) {
+                    return None;
+                };
+                let mount_point = lines.next()?;
+                Some(MountedPartition {
+                    device_path: device.into(),
+                    mount_point: mount_point.into(),
+                })
+            })
+            .collect();
+        // chekcs if a mounted partition is there
+        if output.len() > 0 {
+            return Ok(Some(output));
+        }
     }
-    warn!("Error false path");
-    Ok(false)
+    Ok(None)
 }
 #[cfg(test)]
 mod tests {

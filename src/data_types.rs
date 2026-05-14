@@ -1,26 +1,38 @@
 use std::path::PathBuf;
 
+/// Storage Device
 #[derive(Debug, Clone)]
 pub struct BlockDevice {
     /// Platform-native path: /dev/sdb, /dev/rdisk2, \\.\PhysicalDrive1
     pub path: PathBuf,
     /// Human readable name: "Samsung USB Drive"
     pub name: String,
+    /// the size in bytes see get_size
+    //TODO: Fix link to size here
     pub size_bytes: u64,
     /// Check if removable
     pub is_removable: bool,
     /// Check if its mounted
-    pub is_mounted: bool,
+    pub is_mounted: Option<Vec<MountedPartition>>,
     /// Sector size
     pub sector_size: u32,
 }
 
+/// Information about Mounted Partition
 #[derive(Debug, Clone)]
 pub struct MountedPartition {
-    pub device_path: PathBuf, //  /dev/sdb1
-    pub mount_point: PathBuf, //  /media/user/BOOT
+    /// path
+    ///
+    /// example: /dev/sda
+    pub device_path: PathBuf,
+    /// on device path
+    ///
+    ///example:  /media/user/BOOT
+    pub mount_point: PathBuf,
 }
 
+/// The progress of flashing to the device
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct FlashProgress {
     pub bytes_written: u64,
@@ -29,6 +41,7 @@ pub struct FlashProgress {
     pub phase: FlashPhase,
 }
 
+#[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlashPhase {
     Preparing,
@@ -40,6 +53,7 @@ pub enum FlashPhase {
 }
 
 /// The Devices Size rounded
+#[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Size {
     Bytes(u64),
@@ -49,12 +63,14 @@ pub enum Size {
 }
 
 /// Events to devices
+#[allow(missing_docs)]
 #[derive(Debug)]
 pub enum DeviceEvent {
     Added(BlockDevice),
     Removed(PathBuf),
 }
 impl FlashProgress {
+    /// how the flash transisiton states
     #[must_use]
     pub fn phase(phase: FlashPhase) -> Self {
         FlashProgress {

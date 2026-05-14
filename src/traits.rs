@@ -4,6 +4,7 @@ use crate::{
         DeviceEvent,
         FlashPhase,
         FlashProgress,
+        MountedPartition,
     },
     error::{
         FlashError,
@@ -15,7 +16,9 @@ use crate::{
 /// Separated from DeviceWriter so the handle can carry platform state
 /// (e.g. Windows keeps the lock handle alive here).
 pub trait RawWriteHandle {
+    /// write to fill with offset
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()>;
+    /// read to fill with offset
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<()>;
 
     /// Flush kernel buffers → physical media. Must be called before Done.
@@ -31,8 +34,10 @@ pub trait RawWriteHandle {
 /// Abstracted because Windows requires different open flags,
 /// sector-aligned writes, and the handle must stay open post-lock.
 pub trait DeviceWriter {
+    /// wrte handle
     type Handle: RawWriteHandle;
 
+    /// open file with lock
     fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle>;
 }
 
@@ -42,6 +47,7 @@ pub trait DeviceWriter {
 ///   macOS   → IOKit IOMedia registry  
 ///   Windows → SetupDi / WMI
 pub trait DeviceEnumerator {
+    /// list all storage devices
     fn list_devices(&self) -> FlashResult<Vec<BlockDevice>>;
 
     /// Watch for hotplug events (USB insert/remove).
@@ -60,11 +66,15 @@ pub trait DeviceUnmounter {
     fn unmount_all(&self, device: &BlockDevice) -> FlashResult<()>;
 
     /// Check if any partition is still mounted
-    fn is_fully_unmounted(&self, device: &BlockDevice) -> FlashResult<bool>;
+    fn is_fully_unmounted(
+        &self,
+        device: &BlockDevice,
+    ) -> FlashResult<Option<Vec<MountedPartition>>>;
 }
 
 /// Eject the device after flashing so the user can safely remove it.
 pub trait DeviceEjector {
+    /// eject device
     fn eject(&self, device: &BlockDevice) -> FlashResult<()>;
 }
 /// Decompress / stream an image file into a byte source.
@@ -82,6 +92,8 @@ pub trait ImageSource {
         None
     }
 }
+/// Generic Flasher
+#[derive(Debug)]
 pub struct Flasher<E, U, W, J>
 where
     E: DeviceEnumerator,
@@ -113,9 +125,11 @@ where
             chunk_size,
         }
     }
+    /// Get all storage decies with intoformation
     pub fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
         self.enumerator.list_devices()
     }
+    /// flashes file to storage
     pub fn flash(
         &self,
         mut source: impl ImageSource,
@@ -126,7 +140,7 @@ where
         on_progress(FlashProgress::phase(FlashPhase::Unmounting));
         self.unmounter.unmount_all(device)?;
 
-        if !self.unmounter.is_fully_unmounted(device)? {
+        if self.unmounter.is_fully_unmounted(device)?.is_none() {
             return Err(FlashError::DeviceBusy {
                 path: device.path.clone(),
             });

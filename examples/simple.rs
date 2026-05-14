@@ -1,3 +1,4 @@
+//! simple devices get and there size
 use flashkit::flash;
 use tracing::{
     Level,
