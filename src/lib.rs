@@ -8,9 +8,6 @@
 //! - [ ] Macos
 //!
 
-#[cfg(target_os = "linux")]
-use crate::traits::Flasher;
-
 /// Libary Data types
 pub mod data_types;
 /// Errors
@@ -34,6 +31,8 @@ use linux::{
     LinuxDeviceUnmounter as SysUnmounter,
     LinuxDeviceWriter as SysWriter,
 };
+
+use crate::traits::Flasher;
 
 // #[cfg(target_os = "windows")]
 // use windows::{
