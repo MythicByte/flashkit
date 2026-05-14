@@ -13,13 +13,14 @@ use rustix::{
     mount::UnmountFlags,
     path::Arg,
 };
-use tracing::instrument;
+use tracing::{
+    error,
+    instrument,
+    warn,
+};
 
 use crate::{
-    data_types::{
-        BlockDevice,
-        DeviceEvent,
-    },
+    data_types::BlockDevice,
     error::{
         FlashError,
         FlashResult,
@@ -149,9 +150,9 @@ impl DeviceEnumerator for LinuxDeviceEnumerator {
             })
             .collect())
     }
-    fn watch_devices(&self) -> FlashResult<std::sync::mpsc::Receiver<DeviceEvent>> {
-        todo!()
-    }
+    // fn watch_devices(&self) -> FlashResult<std::sync::mpsc::Receiver<DeviceEvent>> {
+    //     todo!()
+    // }
 }
 impl DeviceUnmounter for LinuxDeviceUnmounter {
     fn unmount_all(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
@@ -240,10 +241,11 @@ impl<R: Read> ImageSource for LinuxImageSource<R> {
     }
 }
 /// Check if mounted
+#[instrument(ret)]
 fn mounted_status(path: PathBuf) -> Result<bool, FlashError> {
     let path_selected = path
         .components()
-        .nth(1)
+        .nth(3)
         .ok_or(FlashError::DeviceNotFound(path.clone()))?;
     let mounted_devices = fs::read_to_string("/proc/mounts")?;
     let device = path_selected
@@ -254,14 +256,20 @@ fn mounted_status(path: PathBuf) -> Result<bool, FlashError> {
     dev_path_search.push("/dev");
     dev_path_search.push(device);
     if !dev_path_search.exists() {
-        return Ok(false);
+        return Err(FlashError::DeviceNotFound(dev_path_search));
     }
     let search_string_from_path = dev_path_search.to_str();
+    warn!("{:?}", search_string_from_path);
     if let Some(correct_device_path) = search_string_from_path {
-        mounted_devices
-            .lines()
-            .find(|line| correct_device_path == *line);
+        return Ok(mounted_devices.lines().any(|line| {
+            line.split_whitespace()
+                .next()
+                .iter()
+                .find(|x| x.starts_with(correct_device_path))
+                .is_some()
+        }));
     }
+    warn!("Error false path");
     Ok(false)
 }
 #[cfg(test)]
