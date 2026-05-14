@@ -19,4 +19,7 @@ fn main() {
     let flasher = flash();
     let devices = flasher.list_devices();
     println!("{:#?}", devices);
+    devices.unwrap().into_iter().for_each(|x| {
+        println!("Size: {:?}", x.get_sizes());
+    });
 }
