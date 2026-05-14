@@ -40,4 +40,7 @@ pub enum FlashError {
 
     #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
+
+    #[error("integer conversion failed: {0}")]
+    TryFromInt(#[from] std::num::TryFromIntError),
 }
