@@ -5,16 +5,19 @@ use std::{
         OpenOptions,
     },
     io::Read,
-    os::unix::fs::FileExt,
+    os::unix::fs::{
+        FileExt,
+        OpenOptionsExt,
+    },
     path::PathBuf,
 };
 
 use rustix::{
+    fs::OFlags,
     mount::UnmountFlags,
     path::Arg,
 };
 use tracing::{
-    error,
     instrument,
     warn,
 };
@@ -208,6 +211,7 @@ impl DeviceWriter for LinuxDeviceWriter {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(OFlags::EXCL.bits().try_into()?)
             .open(device.path.clone())
             .map_err(|_| FlashError::InsufficientPrivileges)?;
 
