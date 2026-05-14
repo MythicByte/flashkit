@@ -12,7 +12,7 @@ pub struct BlockDevice {
     /// Check if its mounted
     pub is_mounted: bool,
     /// Sector size
-    pub sector_size: u16,
+    pub sector_size: u32,
 }
 
 #[derive(Debug, Clone)]

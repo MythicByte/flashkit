@@ -1,5 +1,11 @@
 use std::{
-    fs,
+    fs::{
+        self,
+        File,
+        OpenOptions,
+    },
+    io::Read,
+    os::unix::fs::FileExt,
     path::PathBuf,
 };
 
@@ -27,18 +33,38 @@ use crate::{
     },
 };
 
-pub struct LinuxRawWriteHandle;
+pub struct LinuxRawWriteHandle {
+    file: fs::File,
+    phyisical_sector_size: u32,
+    size_bytes: u64,
+}
 pub struct LinuxDeviceEnumerator;
 pub struct LinuxDeviceUnmounter;
 pub struct LinuxDeviceWriter;
 pub struct LinuxDeviceEjector;
-pub struct LinuxImageSource;
-
+pub struct LinuxImageSource<R>
+where
+    R: Read,
+{
+    reader: R,
+    uncompressed_size: Option<u64>,
+    expected_hash: Option<[u8; 32]>,
+}
+impl<R: Read> LinuxImageSource<R> {
+    /// default constructor
+    pub fn new(reader: R, uncompressed_size: Option<u64>, expected_hash: Option<[u8; 32]>) -> Self {
+        Self {
+            reader,
+            uncompressed_size,
+            expected_hash,
+        }
+    }
+}
 impl LinuxDeviceEnumerator {
     /// name of the usb device
     // TODO: Check later if correct or remove
     fn name(mut path: PathBuf) -> Result<String, FlashError> {
-        path.push("/device/model");
+        path.push("device/model");
         let file_output = fs::read_to_string(path)?;
         Ok(file_output)
     }
@@ -52,16 +78,17 @@ impl LinuxDeviceEnumerator {
         Some(output)
     }
     /// gets physical sector size
-    fn sector_size(mut path: PathBuf) -> Result<u16, FlashError> {
-        path.push("/queue/logical_block_size");
+    fn sector_size(mut path: PathBuf) -> Result<u32, FlashError> {
+        path.push("queue/logical_block_size");
         let content_file = fs::read_to_string(path)?;
-        let output = content_file.parse::<u16>()?;
+        let output = content_file.parse::<u32>()?;
         Ok(output)
     }
     fn get_size_bytes(mut path: PathBuf) -> Result<u64, FlashError> {
+        const SECTOR_SIZE: u32 = 512;
         path.push("size");
         let file_output = fs::read_to_string(path)?;
-        let bytes_parsed = file_output.parse::<u64>()?;
+        let bytes_parsed = file_output.parse::<u64>()?.saturating_pow(SECTOR_SIZE);
         Ok(bytes_parsed)
     }
     /// if the storage device can be removed
@@ -83,6 +110,14 @@ impl DeviceEnumerator for LinuxDeviceEnumerator {
             .filter_map(|entry| match entry {
                 Ok(correct_entry) => {
                     let path = correct_entry.path();
+                    let file_name = correct_entry.file_name();
+                    let file_name_string_lossy = file_name.to_string_lossy();
+                    if file_name_string_lossy.starts_with("loop")
+                        || file_name_string_lossy.starts_with("ram")
+                        || file_name_string_lossy.starts_with("zram")
+                    {
+                        return None;
+                    }
 
                     let output = BlockDevice {
                         path: path.clone(),
@@ -125,47 +160,67 @@ impl DeviceUnmounter for LinuxDeviceUnmounter {
 }
 impl RawWriteHandle for LinuxRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        todo!()
+        self.file
+            .write_all_at(buf, offset)
+            .map_err(|source| FlashError::WriteFailed { offset, source })
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<()> {
-        todo!()
+        self.file.read_exact_at(buf, offset).map_err(FlashError::Io)
     }
 
     fn flush_to_disk(&mut self) -> FlashResult<()> {
-        todo!()
+        self.file.sync_all().map_err(FlashError::Io)
     }
 
-    fn sector_size(&self) -> u64 {
-        todo!()
+    fn sector_size(&self) -> u32 {
+        self.phyisical_sector_size
     }
 
     fn size_bytes(&self) -> FlashResult<u64> {
-        todo!()
+        Ok(self.size_bytes)
     }
 }
 impl DeviceWriter for LinuxDeviceWriter {
-    type Handle;
+    type Handle = LinuxRawWriteHandle;
 
     fn open_for_writing(
         &self,
         device: &crate::data_types::BlockDevice,
     ) -> FlashResult<Self::Handle> {
-        todo!()
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(device.path.clone())
+            .map_err(|_| FlashError::InsufficientPrivileges)?;
+
+        Ok(LinuxRawWriteHandle {
+            file,
+            phyisical_sector_size: device.sector_size,
+            size_bytes: device.size_bytes,
+        })
     }
 }
 impl DeviceEjector for LinuxDeviceEjector {
+    /// check that safe to eject device
     fn eject(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
-        todo!()
+        let file = File::open(device.path.clone())?;
+        if let Err(_) = rustix::fs::fsync(file) {
+            return Err(FlashError::SyncError);
+        }
+        Ok(())
     }
 }
-impl ImageSource for LinuxImageSource {
+impl<R: Read> ImageSource for LinuxImageSource<R> {
     fn uncompressed_size(&self) -> Option<u64> {
-        todo!()
+        self.uncompressed_size
     }
 
     fn read_chunk(&mut self, buf: &mut [u8]) -> FlashResult<usize> {
-        todo!()
+        self.reader.read(buf).map_err(|e| FlashError::Io(e))
+    }
+    fn expected_hash(&self) -> Option<[u8; 32]> {
+        self.expected_hash
     }
 }
 /// Check if mounted

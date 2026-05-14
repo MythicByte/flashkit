@@ -22,7 +22,7 @@ pub trait RawWriteHandle {
     fn flush_to_disk(&mut self) -> FlashResult<()>;
 
     /// Sector size for this device. Writes must be multiples on Windows.
-    fn sector_size(&self) -> u64;
+    fn sector_size(&self) -> u32;
 
     /// Total writable size in bytes.
     fn size_bytes(&self) -> FlashResult<u64>;
@@ -215,4 +215,26 @@ where
 
         Ok(())
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alignment helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Round `n` down to the nearest multiple of `align`.
+///
+/// `align` **must** be a power of two; this is asserted in debug builds.
+#[inline]
+pub(crate) fn align_down(n: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two(), "align must be a power of two");
+    n & !(align - 1)
+}
+
+/// Round `n` up to the nearest multiple of `align`.
+///
+/// `align` **must** be a power of two; this is asserted in debug builds.
+#[inline]
+pub(crate) fn align_up(n: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two(), "align must be a power of two");
+    (n + align - 1) & !(align - 1)
 }

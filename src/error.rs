@@ -32,6 +32,8 @@ pub enum FlashError {
 
     #[error("Libary feature not for this backend implemented")]
     UnsportedFeature,
+    #[error("A error with synchronisation has accourd")]
+    SyncError,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
