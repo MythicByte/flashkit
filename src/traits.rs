@@ -103,6 +103,19 @@ where
     W: DeviceWriter,
     J: DeviceEjector,
 {
+    /// basic constructor
+    pub fn new(enumerator: E, unmounter: U, writer: W, ejector: J, chunk_size: usize) -> Self {
+        Self {
+            enumerator,
+            unmounter,
+            writer,
+            ejector,
+            chunk_size,
+        }
+    }
+    pub fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
+        self.enumerator.list_devices()
+    }
     pub fn flash(
         &self,
         mut source: impl ImageSource,
