@@ -13,6 +13,10 @@ use rustix::{
     mount::UnmountFlags,
     path::Arg,
 };
+use tracing::{
+    info,
+    instrument,
+};
 
 use crate::{
     data_types::{
@@ -32,16 +36,21 @@ use crate::{
         RawWriteHandle,
     },
 };
-
+#[derive(Debug)]
 pub struct LinuxRawWriteHandle {
     file: fs::File,
     phyisical_sector_size: u32,
     size_bytes: u64,
 }
+#[derive(Debug)]
 pub struct LinuxDeviceEnumerator;
+#[derive(Debug)]
 pub struct LinuxDeviceUnmounter;
+#[derive(Debug)]
 pub struct LinuxDeviceWriter;
+#[derive(Debug)]
 pub struct LinuxDeviceEjector;
+#[derive(Debug)]
 pub struct LinuxImageSource<R>
 where
     R: Read,
@@ -63,6 +72,7 @@ impl<R: Read> LinuxImageSource<R> {
 impl LinuxDeviceEnumerator {
     /// name of the usb device
     // TODO: Check later if correct or remove
+    #[instrument]
     fn name(mut path: PathBuf) -> Result<String, FlashError> {
         path.push("device/model");
         let file_output = fs::read_to_string(path)?;
@@ -70,6 +80,7 @@ impl LinuxDeviceEnumerator {
     }
     /// the dev path
     // TODO: Better error handeling with the string
+    #[instrument]
     fn path(path: PathBuf) -> Option<String> {
         let path = path.components().nth(1)?;
         let mut output = String::with_capacity(10);
@@ -78,12 +89,14 @@ impl LinuxDeviceEnumerator {
         Some(output)
     }
     /// gets physical sector size
+    #[instrument]
     fn sector_size(mut path: PathBuf) -> Result<u32, FlashError> {
         path.push("queue/logical_block_size");
         let content_file = fs::read_to_string(path)?;
         let output = content_file.parse::<u32>()?;
         Ok(output)
     }
+    #[instrument]
     fn get_size_bytes(mut path: PathBuf) -> Result<u64, FlashError> {
         const SECTOR_SIZE: u32 = 512;
         path.push("size");
@@ -92,6 +105,7 @@ impl LinuxDeviceEnumerator {
         Ok(bytes_parsed)
     }
     /// if the storage device can be removed
+    #[instrument]
     fn removable_status(mut path: PathBuf) -> Result<bool, FlashError> {
         path.push("removable");
         let read_status = fs::read_to_string(path)?;
@@ -103,6 +117,7 @@ impl LinuxDeviceEnumerator {
     }
 }
 impl DeviceEnumerator for LinuxDeviceEnumerator {
+    #[instrument]
     fn list_devices(&self) -> crate::error::FlashResult<Vec<crate::data_types::BlockDevice>> {
         const SYS_PATH: &str = "/sys/block/";
         let block_devices_found = std::fs::read_dir(SYS_PATH)?;
@@ -111,6 +126,7 @@ impl DeviceEnumerator for LinuxDeviceEnumerator {
                 Ok(correct_entry) => {
                     let path = correct_entry.path();
                     let file_name = correct_entry.file_name();
+                    // info!("Path: {:?}", &path);
                     let file_name_string_lossy = file_name.to_string_lossy();
                     if file_name_string_lossy.starts_with("loop")
                         || file_name_string_lossy.starts_with("ram")
