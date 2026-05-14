@@ -162,7 +162,7 @@ impl DeviceUnmounter for LinuxDeviceUnmounter {
         })
     }
 
-    fn is_fully_unmounted(
+    fn check_is_fully_unmounted(
         &self,
         device: &crate::data_types::BlockDevice,
     ) -> FlashResult<Option<Vec<MountedPartition>>> {

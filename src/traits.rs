@@ -66,7 +66,7 @@ pub trait DeviceUnmounter {
     fn unmount_all(&self, device: &BlockDevice) -> FlashResult<()>;
 
     /// Check if any partition is still mounted
-    fn is_fully_unmounted(
+    fn check_is_fully_unmounted(
         &self,
         device: &BlockDevice,
     ) -> FlashResult<Option<Vec<MountedPartition>>>;
@@ -81,7 +81,7 @@ pub trait DeviceEjector {
 /// Lets the write loop not care about image format.
 pub trait ImageSource {
     /// Uncompressed size, if known ahead of time.
-    fn uncompressed_size(&self) -> Option<u64>;
+    fn uncompressed_size(&self) -> u64;
 
     /// Read the next chunk of uncompressed data.
     /// Returns 0 on EOF.
@@ -140,7 +140,8 @@ where
         on_progress(FlashProgress::phase(FlashPhase::Unmounting));
         self.unmounter.unmount_all(device)?;
 
-        if self.unmounter.is_fully_unmounted(device)?.is_none() {
+        // if Some(mount) then a mount exists
+        if self.unmounter.check_is_fully_unmounted(device)?.is_some() {
             return Err(FlashError::DeviceBusy {
                 path: device.path.clone(),
             });
@@ -148,7 +149,7 @@ where
 
         // 2. Open raw handle
         let mut handle = self.writer.open_for_writing(device)?;
-        let total_bytes = source.uncompressed_size().unwrap_or(0);
+        let total_bytes = source.uncompressed_size();
         let mut buf = vec![0u8; self.chunk_size];
         let mut offset: u64 = 0;
 
@@ -162,14 +163,11 @@ where
 
         let mut timer = std::time::Instant::now();
         let mut bytes_since_last_report: u64 = 0;
-
-        loop {
+        let mut n: usize = usize::MAX;
+        while n != 0 {
             // Align chunk to sector boundary for Windows compatibility
             let aligned_len = align_down(buf.len(), handle.sector_size() as usize);
-            let n = source.read_chunk(&mut buf[..aligned_len])?;
-            if n == 0 {
-                break;
-            }
+            n = source.read_chunk(&mut buf[..aligned_len])?;
 
             // On Windows: pad last chunk to sector boundary
             let write_len = align_up(n, handle.sector_size() as usize);
@@ -195,7 +193,7 @@ where
         on_progress(FlashProgress::phase(FlashPhase::Flushing));
         handle.flush_to_disk()?;
 
-        // 5. Verify (optional but recommended)
+        // 5. Verify
         on_progress(FlashProgress::phase(FlashPhase::Verifying));
         self.verify(&mut handle, &mut source, offset)?;
 

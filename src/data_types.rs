@@ -36,7 +36,7 @@ where
     R: Read,
 {
     reader: R,
-    uncompressed_size: Option<u64>,
+    uncompressed_size: u64,
     expected_hash: Option<[u8; 32]>,
 }
 /// Information about Mounted Partition
@@ -111,7 +111,7 @@ impl BlockDevice {
 }
 impl<R: Read> ImageSourceFile<R> {
     /// default constructor
-    pub fn new(reader: R, uncompressed_size: Option<u64>, expected_hash: Option<[u8; 32]>) -> Self {
+    pub fn new(reader: R, uncompressed_size: u64, expected_hash: Option<[u8; 32]>) -> Self {
         Self {
             reader,
             uncompressed_size,
@@ -120,7 +120,7 @@ impl<R: Read> ImageSourceFile<R> {
     }
 }
 impl<R: Read> ImageSource for ImageSourceFile<R> {
-    fn uncompressed_size(&self) -> Option<u64> {
+    fn uncompressed_size(&self) -> u64 {
         self.uncompressed_size
     }
 
