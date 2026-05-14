@@ -4,7 +4,6 @@ use crate::{
         DeviceEvent,
         FlashPhase,
         FlashProgress,
-        MountedPartition,
     },
     error::{
         FlashError,
@@ -66,10 +65,9 @@ pub trait DeviceUnmounter {
     fn unmount_all(&self, device: &BlockDevice) -> FlashResult<()>;
 
     /// Check if any partition is still mounted
-    fn check_is_fully_unmounted(
-        &self,
-        device: &BlockDevice,
-    ) -> FlashResult<Option<Vec<MountedPartition>>>;
+    ///
+    /// Some(_) means it is mounted
+    fn check_is_fully_unmounted(&self, device: &BlockDevice) -> FlashResult<bool>;
 }
 
 /// Eject the device after flashing so the user can safely remove it.
@@ -140,8 +138,7 @@ where
         on_progress(FlashProgress::phase(FlashPhase::Unmounting));
         self.unmounter.unmount_all(device)?;
 
-        // if Some(mount) then a mount exists
-        if self.unmounter.check_is_fully_unmounted(device)?.is_some() {
+        if self.unmounter.check_is_fully_unmounted(device)? {
             return Err(FlashError::DeviceBusy {
                 path: device.path.clone(),
             });

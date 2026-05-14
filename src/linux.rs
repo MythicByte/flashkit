@@ -165,8 +165,9 @@ impl DeviceUnmounter for LinuxDeviceUnmounter {
     fn check_is_fully_unmounted(
         &self,
         device: &crate::data_types::BlockDevice,
-    ) -> FlashResult<Option<Vec<MountedPartition>>> {
-        mounted_status(device.path.clone())
+    ) -> FlashResult<bool> {
+        // None means no mount here, Some(_) gives back the mount points
+        Ok(mounted_status(device.path.clone())?.is_none())
     }
 }
 impl RawWriteHandle for LinuxRawWriteHandle {
