@@ -279,7 +279,7 @@ fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashE
             })
             .collect();
         // chekcs if a mounted partition is there
-        if output.is_empty() {
+        if !output.is_empty() {
             return Ok(Some(output));
         }
     }
