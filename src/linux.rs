@@ -97,13 +97,13 @@ impl LinuxDeviceEnumerator {
     }
     #[instrument(ret)]
     fn get_size_bytes(mut path: PathBuf) -> Result<u64, FlashError> {
-        const SECTOR_SIZE: u32 = 512;
+        const SECTOR_SIZE: u64 = 512;
         path.push("size");
         let file_output = fs::read_to_string(path)?;
         let bytes_parsed = file_output
             .trim()
             .parse::<u64>()?
-            .saturating_pow(SECTOR_SIZE);
+            .saturating_mul(SECTOR_SIZE);
         Ok(bytes_parsed)
     }
     /// if the storage device can be removed
