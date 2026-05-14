@@ -46,4 +46,6 @@ pub enum FlashError {
 
     #[error(transparent)]
     TryInt(#[from] std::num::TryFromIntError),
+    #[error("A array was accesed out of bounds")]
+    OutOfBoundsArray,
 }

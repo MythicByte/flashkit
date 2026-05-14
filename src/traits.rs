@@ -166,15 +166,19 @@ where
         let mut n: usize = usize::MAX;
         while n != 0 {
             // Align chunk to sector boundary for Windows compatibility
-            let aligned_len = align_down(buf.len(), handle.sector_size() as usize);
-            n = source.read_chunk(&mut buf[..aligned_len])?;
+            let aligned_len = align_down(buf.len(), handle.sector_size().try_into()?);
+            let buffer_read = buf
+                .get_mut(..aligned_len)
+                .ok_or(FlashError::OutOfBoundsArray)?;
+            n = source.read_chunk(buffer_read)?;
 
             // On Windows: pad last chunk to sector boundary
-            let write_len = align_up(n, handle.sector_size() as usize);
-            handle.write_at(offset, &buf[..write_len])?;
+            let write_len = align_up(n, handle.sector_size().try_into()?);
+            let buffer_write = buf.get(..write_len).ok_or(FlashError::OutOfBoundsArray)?;
+            handle.write_at(offset, buffer_write)?;
 
-            offset += n as u64; // track real bytes, not padded
-            bytes_since_last_report += n as u64;
+            offset += u64::try_from(n)?; // track real bytes, not padded
+            bytes_since_last_report += u64::try_from(n)?;
 
             let elapsed = timer.elapsed().as_secs_f64();
             if elapsed >= 0.25 {
@@ -219,23 +223,26 @@ where
         let mut offset = 0u64;
 
         while offset < written_bytes {
-            let to_read = buf.len().min((written_bytes - offset) as usize);
-            handle.read_at(offset, &mut buf[..to_read])?;
-            hasher.update(&buf[..to_read]);
-            offset += to_read as u64;
+            let to_read = buf
+                .len()
+                .min((written_bytes.saturating_sub(offset)).try_into()?);
+            let buffer = buf.get_mut(..to_read).ok_or(FlashError::OutOfBoundsArray)?;
+            handle.read_at(offset, buffer)?;
+            hasher.update(&buffer);
+            offset += u64::try_from(to_read)?;
         }
 
         let actual = hasher.finalize();
 
-        if let Some(expected) = source.expected_hash() {
-            if actual.as_slice() != expected {
-                let failing_hash_hex = hex::encode(actual);
-                let correct_hash_hex = hex::encode(expected);
-                return Err(FlashError::VerificationFailed {
-                    failed_hash_hex: failing_hash_hex,
-                    expected_hex: correct_hash_hex,
-                });
-            }
+        if let Some(expected) = source.expected_hash()
+            && actual.as_slice() != expected
+        {
+            let failing_hash_hex = hex::encode(actual);
+            let correct_hash_hex = hex::encode(expected);
+            return Err(FlashError::VerificationFailed {
+                failed_hash_hex: failing_hash_hex,
+                expected_hex: correct_hash_hex,
+            });
         }
 
         Ok(())
