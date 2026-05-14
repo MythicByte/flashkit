@@ -43,4 +43,7 @@ pub enum FlashError {
 
     #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
+
+    #[error(transparent)]
+    TryInt(#[from] std::num::TryFromIntError),
 }

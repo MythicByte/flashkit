@@ -5,7 +5,10 @@ use std::{
         OpenOptions,
     },
     io::Read,
-    os::unix::fs::FileExt,
+    os::unix::fs::{
+        FileExt,
+        OpenOptionsExt,
+    },
     path::PathBuf,
 };
 
@@ -222,8 +225,12 @@ impl DeviceWriter for LinuxDeviceWriter {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            //Linux 2.6 and later  if the block device is in use by the system like mounted fails with the error EBUSY
+            .custom_flags(rustix::fs::OFlags::EXCL.bits().try_into()?)
             .open(device.path.clone())
             .map_err(|_| FlashError::InsufficientPrivileges)?;
+
+        //TODO: test if flock works or ioctl is needed
         if let Err(error) = rustix::fs::flock(&file, FlockOperation::LockExclusive) {
             let error_back = match error.kind() {
                 std::io::ErrorKind::NotFound => FlashError::DeviceNotFound(device.path.clone()),
