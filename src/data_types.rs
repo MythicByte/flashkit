@@ -1,4 +1,15 @@
-use std::path::PathBuf;
+use std::{
+    io::Read,
+    path::PathBuf,
+};
+
+use crate::{
+    error::{
+        FlashError,
+        FlashResult,
+    },
+    traits::ImageSource,
+};
 
 /// Storage Device
 #[derive(Debug, Clone)]
@@ -18,6 +29,16 @@ pub struct BlockDevice {
     pub sector_size: u32,
 }
 
+/// How the file written is checked and information about it
+#[derive(Debug)]
+pub struct ImageSourceFile<R>
+where
+    R: Read,
+{
+    reader: R,
+    uncompressed_size: Option<u64>,
+    expected_hash: Option<[u8; 32]>,
+}
 /// Information about Mounted Partition
 #[derive(Debug, Clone)]
 pub struct MountedPartition {
@@ -52,7 +73,7 @@ pub enum FlashPhase {
     Done,
 }
 
-/// The Devices Size rounded
+/// The Devices Size rounded down
 #[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Size {
@@ -86,6 +107,28 @@ impl BlockDevice {
     #[must_use]
     pub fn get_sizes(&self) -> Size {
         calculate_size_from_bytes(self.size_bytes)
+    }
+}
+impl<R: Read> ImageSourceFile<R> {
+    /// default constructor
+    pub fn new(reader: R, uncompressed_size: Option<u64>, expected_hash: Option<[u8; 32]>) -> Self {
+        Self {
+            reader,
+            uncompressed_size,
+            expected_hash,
+        }
+    }
+}
+impl<R: Read> ImageSource for ImageSourceFile<R> {
+    fn uncompressed_size(&self) -> Option<u64> {
+        self.uncompressed_size
+    }
+
+    fn read_chunk(&mut self, buf: &mut [u8]) -> FlashResult<usize> {
+        self.reader.read(buf).map_err(FlashError::Io)
+    }
+    fn expected_hash(&self) -> Option<[u8; 32]> {
+        self.expected_hash
     }
 }
 /// generates from bytes rounded biggest value

@@ -4,7 +4,6 @@ use std::{
         File,
         OpenOptions,
     },
-    io::Read,
     os::unix::fs::{
         FileExt,
         OpenOptionsExt,
@@ -36,7 +35,6 @@ use crate::{
         DeviceEnumerator,
         DeviceUnmounter,
         DeviceWriter,
-        ImageSource,
         RawWriteHandle,
     },
 };
@@ -59,26 +57,6 @@ pub struct LinuxDeviceWriter;
 /// how the disk is ejected
 #[derive(Debug)]
 pub struct LinuxDeviceEjector;
-/// How the file written is checked and information about it
-#[derive(Debug)]
-pub struct LinuxImageSource<R>
-where
-    R: Read,
-{
-    reader: R,
-    uncompressed_size: Option<u64>,
-    expected_hash: Option<[u8; 32]>,
-}
-impl<R: Read> LinuxImageSource<R> {
-    /// default constructor
-    pub fn new(reader: R, uncompressed_size: Option<u64>, expected_hash: Option<[u8; 32]>) -> Self {
-        Self {
-            reader,
-            uncompressed_size,
-            expected_hash,
-        }
-    }
-}
 impl LinuxDeviceEnumerator {
     /// name of the usb device
     // TODO: Check later if correct or remove
@@ -261,18 +239,6 @@ impl DeviceEjector for LinuxDeviceEjector {
             return Err(FlashError::SyncError);
         }
         Ok(())
-    }
-}
-impl<R: Read> ImageSource for LinuxImageSource<R> {
-    fn uncompressed_size(&self) -> Option<u64> {
-        self.uncompressed_size
-    }
-
-    fn read_chunk(&mut self, buf: &mut [u8]) -> FlashResult<usize> {
-        self.reader.read(buf).map_err(FlashError::Io)
-    }
-    fn expected_hash(&self) -> Option<[u8; 32]> {
-        self.expected_hash
     }
 }
 /// Check if mounted
