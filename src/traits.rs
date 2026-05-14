@@ -160,29 +160,29 @@ where
 
         let mut timer = std::time::Instant::now();
         let mut bytes_since_last_report: u64 = 0;
-        let mut n: usize = usize::MAX;
-        while n != 0 {
+        let mut status_read_back: usize = usize::MAX;
+        while status_read_back != 0 {
             // Align chunk to sector boundary for Windows compatibility
             let aligned_len = align_down(buf.len(), handle.sector_size().try_into()?);
             let buffer_read = buf
                 .get_mut(..aligned_len)
                 .ok_or(FlashError::OutOfBoundsArray)?;
-            n = source.read_chunk(buffer_read)?;
+            status_read_back = source.read_chunk(buffer_read)?;
 
             // On Windows: pad last chunk to sector boundary
-            let write_len = align_up(n, handle.sector_size().try_into()?);
+            let write_len = align_up(status_read_back, handle.sector_size().try_into()?);
             let buffer_write = buf.get(..write_len).ok_or(FlashError::OutOfBoundsArray)?;
             handle.write_at(offset, buffer_write)?;
 
-            offset += u64::try_from(n)?; // track real bytes, not padded
-            bytes_since_last_report += u64::try_from(n)?;
+            offset += u64::try_from(status_read_back)?; // track real bytes, not padded
+            bytes_since_last_report += u64::try_from(status_read_back)?;
 
             let elapsed = timer.elapsed().as_secs_f64();
             if elapsed >= 0.25 {
                 on_progress(FlashProgress {
                     bytes_written: offset,
                     total_bytes,
-                    bytes_per_sec: bytes_since_last_report as f64 / elapsed,
+                    bytes_per_sec: f64::from_bits(bytes_since_last_report) / elapsed,
                     phase: FlashPhase::Writing,
                 });
                 bytes_since_last_report = 0;
