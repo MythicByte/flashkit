@@ -254,7 +254,6 @@ fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashE
         return Err(FlashError::DeviceNotFound(dev_path_search));
     }
     let search_string_from_path = dev_path_search.to_str();
-    warn!("{:?}", search_string_from_path);
     if let Some(correct_device_path) = search_string_from_path {
         let output: Vec<MountedPartition> = mounted_devices
             .lines()
