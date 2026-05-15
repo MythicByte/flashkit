@@ -60,7 +60,6 @@ pub struct LinuxDeviceEjector;
 impl LinuxDeviceEnumerator {
     /// name of the usb device
     // TODO: Check later if correct or remove
-    #[instrument(ret)]
     fn name(mut path: PathBuf) -> Result<String, FlashError> {
         path.push("device/model");
         let file_output = fs::read_to_string(path)?;
@@ -68,7 +67,6 @@ impl LinuxDeviceEnumerator {
     }
     /// the dev path
     // TODO: Better error handeling with the string
-    #[instrument(ret)]
     fn path(path: PathBuf) -> Option<PathBuf> {
         // 3 needed from getting /sys/block/xy the xy
         let path = path.components().nth(3)?;
@@ -78,14 +76,12 @@ impl LinuxDeviceEnumerator {
         Some(output)
     }
     /// gets physical sector size
-    #[instrument(ret)]
     fn sector_size(mut path: PathBuf) -> Result<u32, FlashError> {
         path.push("queue/logical_block_size");
         let content_file = fs::read_to_string(path)?;
         let output = content_file.trim().parse::<u32>()?;
         Ok(output)
     }
-    #[instrument(ret)]
     fn get_size_bytes(mut path: PathBuf) -> Result<u64, FlashError> {
         const SECTOR_SIZE: u64 = 512;
         path.push("size");
@@ -97,7 +93,6 @@ impl LinuxDeviceEnumerator {
         Ok(bytes_parsed)
     }
     /// if the storage device can be removed
-    #[instrument(ret)]
     fn removable_status(mut path: PathBuf) -> Result<bool, FlashError> {
         path.push("removable");
         let read_status = fs::read_to_string(path)?;
@@ -109,7 +104,6 @@ impl LinuxDeviceEnumerator {
     }
 }
 impl DeviceEnumerator for LinuxDeviceEnumerator {
-    #[instrument(ret)]
     fn list_devices(&self) -> crate::error::FlashResult<Vec<crate::data_types::BlockDevice>> {
         const SYS_PATH: &str = "/sys/block/";
         let block_devices_found = std::fs::read_dir(SYS_PATH)?;
@@ -243,7 +237,6 @@ impl DeviceEjector for LinuxDeviceEjector {
     }
 }
 /// Check if mounted
-#[instrument(ret)]
 fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashError> {
     let path_selected = path
         .components()
