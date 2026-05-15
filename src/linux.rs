@@ -16,10 +16,6 @@ use rustix::{
     mount::UnmountFlags,
     path::Arg,
 };
-use tracing::{
-    instrument,
-    warn,
-};
 
 use crate::{
     data_types::{

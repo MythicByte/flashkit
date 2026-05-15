@@ -1,6 +1,9 @@
 use std::{
     io::Read,
-    path::PathBuf,
+    path::{
+        Path,
+        PathBuf,
+    },
 };
 
 use crate::{
@@ -93,12 +96,12 @@ pub enum DeviceEvent {
 impl FlashProgress {
     /// how the flash transisiton states
     #[must_use]
-    pub fn phase(phase: FlashPhase) -> Self {
+    pub fn transition(phase_state: FlashPhase) -> Self {
         FlashProgress {
             bytes_written: 0,
             total_bytes: 0,
             bytes_per_sec: 0.0,
-            phase,
+            phase: phase_state,
         }
     }
 }
@@ -107,6 +110,36 @@ impl BlockDevice {
     #[must_use]
     pub fn get_sizes(&self) -> Size {
         calculate_size_from_bytes(self.size_bytes)
+    }
+    /// gives name back
+    #[must_use]
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// gives size in bytes aback
+    #[must_use]
+    #[inline]
+    pub fn size_in_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+    /// gives back if the device is removable usb ...
+    #[must_use]
+    #[inline]
+    pub fn removable(&self) -> bool {
+        self.is_removable
+    }
+    /// gives mounted points back or None then none mounted
+    #[must_use]
+    #[inline]
+    pub fn mounted(&self) -> Option<Vec<MountedPartition>> {
+        self.is_mounted.clone()
+    }
+    /// gives physical sector size back
+    #[must_use]
+    #[inline]
+    pub fn sector_size(&self) -> u32 {
+        self.sector_size
     }
 }
 impl<R: Read> ImageSourceFile<R> {
@@ -129,6 +162,46 @@ impl<R: Read> ImageSource for ImageSourceFile<R> {
     }
     fn expected_hash(&self) -> Option<[u8; 32]> {
         self.expected_hash
+    }
+}
+impl MountedPartition {
+    /// gives device path back
+    #[must_use]
+    #[inline]
+    pub fn device_path(&self) -> &Path {
+        &self.device_path
+    }
+    /// gives mount point back
+    #[must_use]
+    #[inline]
+    pub fn mount_point(&self) -> &Path {
+        &self.mount_point
+    }
+}
+impl FlashProgress {
+    /// gives bytes written back
+    #[must_use]
+    #[inline]
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+    /// gives total bytes back
+    #[must_use]
+    #[inline]
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+    /// gives byte per second back
+    #[must_use]
+    #[inline]
+    pub fn bytes_per_sec(&self) -> f64 {
+        self.bytes_per_sec
+    }
+    /// gives the phase in is now back
+    #[must_use]
+    #[inline]
+    pub fn phase(&self) -> FlashPhase {
+        self.phase.clone()
     }
 }
 /// generates from bytes rounded biggest value

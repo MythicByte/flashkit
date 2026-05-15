@@ -135,7 +135,7 @@ where
         on_progress: impl Fn(FlashProgress),
     ) -> FlashResult<()> {
         // 1. Unmount
-        on_progress(FlashProgress::phase(FlashPhase::Unmounting));
+        on_progress(FlashProgress::transition(FlashPhase::Unmounting));
         self.unmounter.unmount_all(device)?;
 
         if self.unmounter.check_is_fully_unmounted(device)? {
@@ -191,17 +191,17 @@ where
         }
 
         // 4. Flush
-        on_progress(FlashProgress::phase(FlashPhase::Flushing));
+        on_progress(FlashProgress::transition(FlashPhase::Flushing));
         handle.flush_to_disk()?;
 
         // 5. Verify
-        on_progress(FlashProgress::phase(FlashPhase::Verifying));
+        on_progress(FlashProgress::transition(FlashPhase::Verifying));
         self.verify(&mut handle, &mut source, offset)?;
 
         // 6. Eject
         self.ejector.eject(device)?;
 
-        on_progress(FlashProgress::phase(FlashPhase::Done));
+        on_progress(FlashProgress::transition(FlashPhase::Done));
         Ok(())
     }
 
