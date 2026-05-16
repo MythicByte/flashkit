@@ -8,6 +8,7 @@ use std::{
 
 use futures::Stream;
 use tokio::io::{
+    AsyncBufReadExt,
     AsyncReadExt,
     AsyncWriteExt,
 };
@@ -308,23 +309,40 @@ where
         handle: &mut W::Handle,
         source: impl ImageSource + tokio::io::AsyncRead + tokio::io::AsyncBufRead + Unpin,
         written_bytes: u64,
-    ) -> FlashResult<()> {
+        send_progress: tokio::sync::mpsc::Sender<FlashProgress>,
+    ) -> FlashResult<tokio::sync::mpsc::Sender<FlashProgress>>
+    where
+        W::Handle: tokio::io::AsyncRead + Unpin,
+    {
         use sha2::{
             Digest,
             Sha256,
         };
-        let mut buf = vec![0u8; self.chunk_size];
+        let mut timer = std::time::Instant::now();
+        let mut reader = tokio::io::BufReader::with_capacity(self.chunk_size, handle);
+        reader.fill_buf().await?;
         let mut hasher = Sha256::new();
         let mut offset = 0u64;
-
-        while offset < written_bytes {
-            let to_read = buf
-                .len()
-                .min((written_bytes.saturating_sub(offset)).try_into()?);
-            let buffer = buf.get_mut(..to_read).ok_or(FlashError::OutOfBoundsArray)?;
-            handle.read_at(offset, buffer)?;
-            hasher.update(&buffer);
-            offset += u64::try_from(to_read)?;
+        let mut tmp_counter: u64 = 0;
+        while !reader.buffer().is_empty() {
+            hasher.update(reader.buffer());
+            offset += u64::try_from(reader.buffer().len())?;
+            tmp_counter += reader.buffer().len() as u64;
+            let elapsed = timer.elapsed().as_secs_f64();
+            if elapsed >= 0.50 {
+                send_progress
+                    .send(FlashProgress {
+                        bytes_written: offset,
+                        total_bytes: written_bytes,
+                        bytes_per_sec: tmp_counter as f64 / elapsed,
+                        phase: FlashPhase::Verifying,
+                    })
+                    .await
+                    .map_err(|_| FlashError::SendChannelError)?;
+                tmp_counter = 0;
+                timer = std::time::Instant::now();
+            }
+            reader.consume(reader.buffer().len());
         }
 
         let actual = hasher.finalize();
@@ -340,7 +358,7 @@ where
             });
         }
 
-        Ok(())
+        Ok(send_progress)
     }
     /// flash async versions
     pub async fn flash(
@@ -352,6 +370,7 @@ where
     where
         <W as DeviceWriter>::Handle: tokio::io::AsyncWrite,
         <W as DeviceWriter>::Handle: Unpin,
+        <W as DeviceWriter>::Handle: tokio::io::AsyncRead,
     {
         on_progress
             .send(FlashProgress::transition(FlashPhase::Unmounting))
@@ -440,11 +459,13 @@ where
             .map_err(|_| FlashError::SendChannelError)?;
 
         let source = reader.into_inner();
-        self.verify(&mut handle, source, offset).await?;
+        let sender = self
+            .verify(&mut handle, source, offset, on_progress)
+            .await?;
 
         self.ejector.eject(device)?;
 
-        on_progress
+        sender
             .send(FlashProgress::transition(FlashPhase::Done))
             .await
             .map_err(|_| FlashError::SendChannelError)?;
