@@ -1,4 +1,10 @@
-use std::io;
+use std::{
+    io,
+    io::{
+        Read,
+        Write,
+    },
+};
 
 use futures::Stream;
 use tokio::io::{
@@ -12,7 +18,6 @@ use crate::{
         DeviceEvent,
         FlashPhase,
         FlashProgress,
-        ImageSourceFile,
     },
     error::{
         FlashError,
@@ -151,12 +156,17 @@ where
     /// flashes file to storage
     pub fn block_flash(
         &self,
-        mut source: impl ImageSource,
+        source: impl ImageSource + std::io::Read,
         device: &BlockDevice,
-        on_progress: impl Fn(FlashProgress),
-    ) -> FlashResult<()> {
+        on_progress: std::sync::mpsc::Sender<FlashProgress>,
+    ) -> FlashResult<()>
+    where
+        <W as DeviceWriter>::Handle: std::io::Write,
+    {
         // 1. Unmount
-        on_progress(FlashProgress::transition(FlashPhase::Unmounting));
+        on_progress
+            .send(FlashProgress::transition(FlashPhase::Unmounting))
+            .map_err(|_| FlashError::SendChannelError)?;
         self.unmounter.unmount_all(device)?;
 
         if !self.unmounter.check_is_fully_unmounted(device)? {
@@ -165,64 +175,91 @@ where
             });
         }
 
-        // 2. Open raw handle
-        let mut handle = self.writer.open_for_writing(device)?;
+        let handle = self.writer.open_for_writing(device)?;
+        let sector_size = handle.sector_size();
         let total_bytes = source.uncompressed_size();
-        let mut buf = vec![0u8; self.chunk_size];
+        let mut reader = std::io::BufReader::with_capacity(sector_size, source);
+        let mut writter = std::io::BufWriter::with_capacity(handle.sector_size(), handle);
         let mut offset: u64 = 0;
 
-        // 3. Write loop
-        on_progress(FlashProgress {
-            bytes_written: 0,
-            total_bytes,
-            bytes_per_sec: 0.0,
-            phase: FlashPhase::Writing,
-        });
+        on_progress
+            .send(FlashProgress {
+                bytes_written: 0,
+                total_bytes,
+                bytes_per_sec: 0.0,
+                phase: FlashPhase::Writing,
+            })
+            .map_err(|_| FlashError::SendChannelError)?;
 
         let mut timer = std::time::Instant::now();
         let mut bytes_since_last_report: u64 = 0;
         let mut status_read_back: usize = usize::MAX;
+        let mut buffer = vec![0u8; sector_size / 8];
+        // Write
         while status_read_back != 0 {
-            // Align chunk to sector boundary for Windows compatibility
-            let aligned_len = align_down(buf.len(), handle.sector_size());
-            let buffer_read = buf
-                .get_mut(..aligned_len)
-                .ok_or(FlashError::OutOfBoundsArray)?;
-            status_read_back = source.read_chunk(buffer_read)?;
-
-            // On Windows: pad last chunk to sector boundary
-            let write_len = align_up(status_read_back, handle.sector_size());
-            let buffer_write = buf.get(..write_len).ok_or(FlashError::OutOfBoundsArray)?;
-            handle.write_at(offset, buffer_write)?;
-
-            offset += u64::try_from(status_read_back)?; // track real bytes, not padded
-            bytes_since_last_report += u64::try_from(status_read_back)?;
+            match reader.read(&mut buffer) {
+                Ok(number_read) => {
+                    if number_read == 0 {
+                        break;
+                    }
+                    status_read_back = number_read;
+                    writter.write_all(&buffer)?;
+                    offset += sector_size as u64;
+                }
+                Err(error) => {
+                    match error.kind() {
+                        io::ErrorKind::UnexpectedEof => {
+                            let read_backup = reader.read(&mut buffer)?;
+                            offset += read_backup as u64;
+                            buffer
+                                .get_mut(read_backup..sector_size)
+                                .ok_or(FlashError::OutOfBoundsArray)?
+                                .fill(0);
+                            writter.write_all(&buffer)?;
+                            status_read_back = 0;
+                        }
+                        _ => (),
+                    }
+                    tracing::error!("{}", error);
+                }
+            }
 
             let elapsed = timer.elapsed().as_secs_f64();
-            if elapsed >= 0.25 {
-                on_progress(FlashProgress {
-                    bytes_written: offset,
-                    total_bytes,
-                    bytes_per_sec: bytes_since_last_report as f64 / elapsed,
-                    phase: FlashPhase::Writing,
-                });
+            if elapsed >= 0.50 {
+                on_progress
+                    .send(FlashProgress {
+                        bytes_written: offset,
+                        total_bytes,
+                        bytes_per_sec: bytes_since_last_report as f64 / elapsed,
+                        phase: FlashPhase::Writing,
+                    })
+                    .map_err(|_| FlashError::SendChannelError)?;
                 bytes_since_last_report = 0;
                 timer = std::time::Instant::now();
             }
         }
 
         // 4. Flush
-        on_progress(FlashProgress::transition(FlashPhase::Flushing));
+        on_progress
+            .send(FlashProgress::transition(FlashPhase::Flushing))
+            .map_err(|_| FlashError::SendChannelError)?;
+        writter.flush()?;
+        let mut handle = writter.into_inner().map_err(|e| e.into_error())?;
         handle.flush_to_disk()?;
 
         // 5. Verify
-        on_progress(FlashProgress::transition(FlashPhase::Verifying));
+        on_progress
+            .send(FlashProgress::transition(FlashPhase::Verifying))
+            .map_err(|_| FlashError::SendChannelError)?;
+        let source = reader.into_inner();
         self.block_verify(&mut handle, source, offset)?;
 
         // 6. Eject
         self.ejector.eject(device)?;
 
-        on_progress(FlashProgress::transition(FlashPhase::Done));
+        on_progress
+            .send(FlashProgress::transition(FlashPhase::Done))
+            .map_err(|_| FlashError::SendChannelError)?;
         Ok(())
     }
 
@@ -308,15 +345,15 @@ where
     /// flash async versions
     pub async fn flash(
         &self,
-        mut source: impl ImageSource + tokio::io::AsyncRead + tokio::io::AsyncBufRead + Unpin,
+        source: impl ImageSource + tokio::io::AsyncRead + tokio::io::AsyncBufRead + Unpin,
         device: &BlockDevice,
-        mut on_progress: tokio::sync::mpsc::Sender<FlashProgress>,
+        on_progress: tokio::sync::mpsc::Sender<FlashProgress>,
     ) -> FlashResult<()>
     where
         <W as DeviceWriter>::Handle: tokio::io::AsyncWrite,
         <W as DeviceWriter>::Handle: Unpin,
     {
-        let test = on_progress
+        on_progress
             .send(FlashProgress::transition(FlashPhase::Unmounting))
             .await
             .map_err(|_| FlashError::SendChannelError)?;
@@ -328,7 +365,7 @@ where
             });
         }
 
-        let mut handle = self.writer.open_for_writing(device)?;
+        let handle = self.writer.open_for_writing(device)?;
         let sector_size = handle.sector_size();
         let total_bytes = source.uncompressed_size();
         let mut reader = tokio::io::BufReader::with_capacity(sector_size, source);
@@ -374,8 +411,6 @@ where
                 }
             }
 
-            // writter.write_all(reader.buffer()).await?;
-            //TODO code here
             let elapsed = timer.elapsed().as_secs_f64();
             if elapsed >= 0.50 {
                 on_progress
@@ -416,14 +451,14 @@ where
         Ok(())
     }
 }
-#[inline]
-pub(crate) fn align_down(n: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two(), "align must be a power of two");
-    n & !(align - 1)
-}
+// #[inline]
+// pub(crate) fn align_down(n: usize, align: usize) -> usize {
+//     debug_assert!(align.is_power_of_two(), "align must be a power of two");
+//     n & !(align - 1)
+// }
 
-#[inline]
-pub(crate) fn align_up(n: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two(), "align must be a power of two");
-    (n + align - 1) & !(align - 1)
-}
+// #[inline]
+// pub(crate) fn align_up(n: usize, align: usize) -> usize {
+//     debug_assert!(align.is_power_of_two(), "align must be a power of two");
+//     (n + align - 1) & !(align - 1)
+// }
