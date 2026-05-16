@@ -137,16 +137,18 @@ impl DeviceEnumerator for LinuxDeviceEnumerator {
 impl AsyncDeviceEnumerator for LinuxDeviceEnumerator {
     type WatchStream = ReceiverStream<DeviceEvent>;
 
+    //TODO: finish application
     fn watch_devices(
         &self,
     ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_ {
         async {
             let (tx, rx) = tokio::sync::mpsc::channel(30);
-
+            todo!();
             Ok(ReceiverStream::new(rx))
         }
     }
 
+    //TODO: finish application
     fn watch_devices_with_initial(
         &self,
     ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_ {
@@ -160,6 +162,7 @@ impl AsyncDeviceEnumerator for LinuxDeviceEnumerator {
                     }
                 }
             });
+            todo!();
             Ok(ReceiverStream::new(rx))
         }
     }
