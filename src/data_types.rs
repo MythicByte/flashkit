@@ -190,7 +190,7 @@ impl<R: Read> ImageSourceFile<R> {
         }
     }
 }
-impl<R: AsyncRead + AsyncReadExt + Read> AsyncImageSourceFile<R> {
+impl<R: AsyncRead + AsyncReadExt> AsyncImageSourceFile<R> {
     /// default constructor
     pub fn new(reader: R, uncompressed_size: u64, expected_hash: Option<[u8; 32]>) -> Self {
         Self {
