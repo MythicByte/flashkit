@@ -204,24 +204,20 @@ where
                         break;
                     }
                     status_read_back = number_read;
-                    writter.write_all(&buffer)?;
-                    offset += sector_size as u64;
+                    let buffer_write = match buffer.get(..number_read) {
+                        Some(x) => x,
+                        None => return Err(FlashError::OutOfBoundsArray),
+                    };
+                    writter.write_all(buffer_write)?;
+                    offset += number_read as u64;
+                    bytes_since_last_report += number_read as u64;
                 }
                 Err(error) => {
-                    match error.kind() {
-                        io::ErrorKind::UnexpectedEof => {
-                            let read_backup = reader.read(&mut buffer)?;
-                            offset += read_backup as u64;
-                            buffer
-                                .get_mut(read_backup..sector_size)
-                                .ok_or(FlashError::OutOfBoundsArray)?
-                                .fill(0);
-                            writter.write_all(&buffer)?;
-                            status_read_back = 0;
-                        }
-                        _ => (),
-                    }
-                    tracing::error!("{}", error);
+                    tracing::error!("{}", error.kind());
+                    return Err(FlashError::WriteFailed {
+                        offset,
+                        source: error,
+                    });
                 }
             }
 
