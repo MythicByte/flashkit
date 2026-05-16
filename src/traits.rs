@@ -52,7 +52,7 @@ pub trait DeviceEnumerator {
     fn list_devices(&self) -> FlashResult<Vec<BlockDevice>>;
 }
 /// listening devices async
-pub trait AsyncDeviceEnumerator {
+pub trait AsyncDeviceEnumerator: DeviceEnumerator {
     /// the stream to give back of the events
     type WatchStream: Stream<Item = DeviceEvent> + Send + Unpin + 'static;
     /// watches a device async
