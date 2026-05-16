@@ -48,6 +48,7 @@ where
     expected_hash: Option<[u8; 32]>,
 }
 /// How the async file written is checked and information about it
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct AsyncImageSourceFile<R>
 where
@@ -125,6 +126,7 @@ impl FlashProgress {
 }
 impl BlockDevice {
     /// constructor
+    #[must_use]
     pub fn new(
         path: PathBuf,
         name: String,
