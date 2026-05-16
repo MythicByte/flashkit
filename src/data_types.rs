@@ -52,7 +52,7 @@ where
 #[derive(Debug)]
 pub struct AsyncImageSourceFile<R>
 where
-    R: Read + AsyncRead + AsyncReadExt,
+    R: AsyncRead + AsyncReadExt,
 {
     /// file pointer
     reader: R,
