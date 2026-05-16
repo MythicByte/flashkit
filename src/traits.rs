@@ -195,7 +195,7 @@ where
         let mut timer = std::time::Instant::now();
         let mut bytes_since_last_report: u64 = 0;
         let mut status_read_back: usize = usize::MAX;
-        let mut buffer = vec![0u8; sector_size / 8];
+        let mut buffer = vec![0u8; sector_size];
         // Write
         while status_read_back != 0 {
             match reader.read(&mut buffer) {
@@ -405,7 +405,7 @@ where
         let mut timer = std::time::Instant::now();
         let mut bytes_since_last_report: u64 = 0;
         let mut status_read_back: usize = usize::MAX;
-        let mut buffer = vec![0u8; sector_size / 8];
+        let mut buffer = vec![0u8; sector_size];
         while status_read_back != 0 {
             match reader.read_exact(&mut buffer).await {
                 Ok(number_read) => {
