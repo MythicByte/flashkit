@@ -41,7 +41,7 @@ use crate::{
 #[derive(Debug)]
 pub struct LinuxRawWriteHandle {
     file: fs::File,
-    phyisical_sector_size: u32,
+    phyisical_sector_size: usize,
     size_bytes: u64,
 }
 /// How to enumerate a device
@@ -75,10 +75,10 @@ impl LinuxDeviceEnumerator {
         Some(output)
     }
     /// gets physical sector size
-    fn sector_size(mut path: PathBuf) -> Result<u32, FlashError> {
+    fn sector_size(mut path: PathBuf) -> Result<usize, FlashError> {
         path.push("queue/logical_block_size");
         let content_file = fs::read_to_string(path)?;
-        let output = content_file.trim().parse::<u32>()?;
+        let output = content_file.trim().parse::<usize>()?;
         Ok(output)
     }
     fn get_size_bytes(mut path: PathBuf) -> Result<u64, FlashError> {
@@ -208,7 +208,7 @@ impl RawWriteHandle for LinuxRawWriteHandle {
         self.file.sync_all().map_err(FlashError::Io)
     }
 
-    fn sector_size(&self) -> u32 {
+    fn sector_size(&self) -> usize {
         self.phyisical_sector_size
     }
 

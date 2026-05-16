@@ -6,6 +6,11 @@ use std::{
     },
 };
 
+use tokio::io::{
+    AsyncRead,
+    AsyncReadExt,
+};
+
 use crate::{
     error::{
         FlashError,
@@ -29,7 +34,7 @@ pub struct BlockDevice {
     /// Check if its mounted
     pub is_mounted: Option<Vec<MountedPartition>>,
     /// Sector size
-    pub sector_size: u32,
+    pub sector_size: usize,
 }
 
 /// How the file written is checked and information about it
@@ -40,6 +45,19 @@ where
 {
     reader: R,
     uncompressed_size: u64,
+    expected_hash: Option<[u8; 32]>,
+}
+/// How the async file written is checked and information about it
+#[derive(Debug)]
+pub struct AsyncImageSourceFile<R>
+where
+    R: Read + AsyncRead + AsyncReadExt,
+{
+    /// file pointer
+    reader: R,
+    /// size end of the iso
+    uncompressed_size: u64,
+    /// hash
     expected_hash: Option<[u8; 32]>,
 }
 /// Information about Mounted Partition
@@ -113,7 +131,7 @@ impl BlockDevice {
         size_bytes: u64,
         is_removable: bool,
         is_mounted: Option<Vec<MountedPartition>>,
-        sector_size: u32,
+        sector_size: usize,
     ) -> Self {
         Self {
             path,
@@ -156,11 +174,21 @@ impl BlockDevice {
     /// gives physical sector size back
     #[must_use]
     #[inline]
-    pub fn sector_size(&self) -> u32 {
+    pub fn sector_size(&self) -> usize {
         self.sector_size
     }
 }
 impl<R: Read> ImageSourceFile<R> {
+    /// default constructor
+    pub fn new(reader: R, uncompressed_size: u64, expected_hash: Option<[u8; 32]>) -> Self {
+        Self {
+            reader,
+            uncompressed_size,
+            expected_hash,
+        }
+    }
+}
+impl<R: AsyncRead + AsyncReadExt + Read> AsyncImageSourceFile<R> {
     /// default constructor
     pub fn new(reader: R, uncompressed_size: u64, expected_hash: Option<[u8; 32]>) -> Self {
         Self {

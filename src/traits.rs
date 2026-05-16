@@ -1,4 +1,10 @@
+use std::io;
+
 use futures::Stream;
+use tokio::io::{
+    AsyncReadExt,
+    AsyncWriteExt,
+};
 
 use crate::{
     data_types::{
@@ -6,6 +12,7 @@ use crate::{
         DeviceEvent,
         FlashPhase,
         FlashProgress,
+        ImageSourceFile,
     },
     error::{
         FlashError,
@@ -26,7 +33,7 @@ pub trait RawWriteHandle {
     fn flush_to_disk(&mut self) -> FlashResult<()>;
 
     /// Sector size for this device. Writes must be multiples on Windows.
-    fn sector_size(&self) -> u32;
+    fn sector_size(&self) -> usize;
 
     /// Total writable size in bytes.
     fn size_bytes(&self) -> FlashResult<u64>;
@@ -142,7 +149,7 @@ where
         self.enumerator.list_devices()
     }
     /// flashes file to storage
-    pub fn flash(
+    pub fn block_flash(
         &self,
         mut source: impl ImageSource,
         device: &BlockDevice,
@@ -152,7 +159,7 @@ where
         on_progress(FlashProgress::transition(FlashPhase::Unmounting));
         self.unmounter.unmount_all(device)?;
 
-        if self.unmounter.check_is_fully_unmounted(device)? {
+        if !self.unmounter.check_is_fully_unmounted(device)? {
             return Err(FlashError::DeviceBusy {
                 path: device.path.clone(),
             });
@@ -177,14 +184,14 @@ where
         let mut status_read_back: usize = usize::MAX;
         while status_read_back != 0 {
             // Align chunk to sector boundary for Windows compatibility
-            let aligned_len = align_down(buf.len(), handle.sector_size().try_into()?);
+            let aligned_len = align_down(buf.len(), handle.sector_size());
             let buffer_read = buf
                 .get_mut(..aligned_len)
                 .ok_or(FlashError::OutOfBoundsArray)?;
             status_read_back = source.read_chunk(buffer_read)?;
 
             // On Windows: pad last chunk to sector boundary
-            let write_len = align_up(status_read_back, handle.sector_size().try_into()?);
+            let write_len = align_up(status_read_back, handle.sector_size());
             let buffer_write = buf.get(..write_len).ok_or(FlashError::OutOfBoundsArray)?;
             handle.write_at(offset, buffer_write)?;
 
@@ -196,7 +203,7 @@ where
                 on_progress(FlashProgress {
                     bytes_written: offset,
                     total_bytes,
-                    bytes_per_sec: f64::from_bits(bytes_since_last_report) / elapsed,
+                    bytes_per_sec: bytes_since_last_report as f64 / elapsed,
                     phase: FlashPhase::Writing,
                 });
                 bytes_since_last_report = 0;
@@ -210,7 +217,7 @@ where
 
         // 5. Verify
         on_progress(FlashProgress::transition(FlashPhase::Verifying));
-        self.verify(&mut handle, &mut source, offset)?;
+        self.block_verify(&mut handle, source, offset)?;
 
         // 6. Eject
         self.ejector.eject(device)?;
@@ -219,10 +226,10 @@ where
         Ok(())
     }
 
-    fn verify(
+    fn block_verify(
         &self,
         handle: &mut W::Handle,
-        source: &mut impl ImageSource,
+        source: impl ImageSource,
         written_bytes: u64,
     ) -> FlashResult<()> {
         use sha2::{
@@ -258,24 +265,163 @@ where
 
         Ok(())
     }
+
+    async fn verify(
+        &self,
+        handle: &mut W::Handle,
+        source: impl ImageSource + tokio::io::AsyncRead + tokio::io::AsyncBufRead + Unpin,
+        written_bytes: u64,
+    ) -> FlashResult<()> {
+        use sha2::{
+            Digest,
+            Sha256,
+        };
+        let mut buf = vec![0u8; self.chunk_size];
+        let mut hasher = Sha256::new();
+        let mut offset = 0u64;
+
+        while offset < written_bytes {
+            let to_read = buf
+                .len()
+                .min((written_bytes.saturating_sub(offset)).try_into()?);
+            let buffer = buf.get_mut(..to_read).ok_or(FlashError::OutOfBoundsArray)?;
+            handle.read_at(offset, buffer)?;
+            hasher.update(&buffer);
+            offset += u64::try_from(to_read)?;
+        }
+
+        let actual = hasher.finalize();
+
+        if let Some(expected) = source.expected_hash()
+            && actual.as_slice() != expected
+        {
+            let failing_hash_hex = hex::encode(actual);
+            let correct_hash_hex = hex::encode(expected);
+            return Err(FlashError::VerificationFailed {
+                failed_hash_hex: failing_hash_hex,
+                expected_hex: correct_hash_hex,
+            });
+        }
+
+        Ok(())
+    }
+    /// flash async versions
+    pub async fn flash(
+        &self,
+        mut source: impl ImageSource + tokio::io::AsyncRead + tokio::io::AsyncBufRead + Unpin,
+        device: &BlockDevice,
+        mut on_progress: tokio::sync::mpsc::Sender<FlashProgress>,
+    ) -> FlashResult<()>
+    where
+        <W as DeviceWriter>::Handle: tokio::io::AsyncWrite,
+        <W as DeviceWriter>::Handle: Unpin,
+    {
+        let test = on_progress
+            .send(FlashProgress::transition(FlashPhase::Unmounting))
+            .await
+            .map_err(|_| FlashError::SendChannelError)?;
+        self.unmounter.unmount_all(device)?;
+
+        if !self.unmounter.check_is_fully_unmounted(device)? {
+            return Err(FlashError::DeviceBusy {
+                path: device.path.clone(),
+            });
+        }
+
+        let mut handle = self.writer.open_for_writing(device)?;
+        let sector_size = handle.sector_size();
+        let total_bytes = source.uncompressed_size();
+        let mut reader = tokio::io::BufReader::with_capacity(sector_size, source);
+        let mut writter = tokio::io::BufWriter::with_capacity(handle.sector_size(), handle);
+        let mut offset: u64 = 0;
+
+        on_progress
+            .send(FlashProgress {
+                bytes_written: 0,
+                total_bytes,
+                bytes_per_sec: 0.0,
+                phase: FlashPhase::Writing,
+            })
+            .await
+            .map_err(|_| FlashError::SendChannelError)?;
+
+        let mut timer = std::time::Instant::now();
+        let mut bytes_since_last_report: u64 = 0;
+        let mut status_read_back: usize = usize::MAX;
+        let mut buffer = vec![0u8; sector_size / 8];
+        while status_read_back != 0 {
+            match reader.read_exact(&mut buffer).await {
+                Ok(number_read) => {
+                    status_read_back = number_read;
+                    writter.write_all(&buffer).await?;
+                    offset += sector_size as u64;
+                }
+                Err(error) => {
+                    match error.kind() {
+                        io::ErrorKind::UnexpectedEof => {
+                            let read_backup = reader.read(&mut buffer).await?;
+                            offset += read_backup as u64;
+                            buffer
+                                .get_mut(read_backup..sector_size)
+                                .ok_or(FlashError::OutOfBoundsArray)?
+                                .fill(0);
+                            writter.write_all(&buffer).await?;
+                            status_read_back = 0;
+                        }
+                        _ => (),
+                    }
+                    tracing::error!("{}", error);
+                }
+            }
+
+            // writter.write_all(reader.buffer()).await?;
+            //TODO code here
+            let elapsed = timer.elapsed().as_secs_f64();
+            if elapsed >= 0.50 {
+                on_progress
+                    .send(FlashProgress {
+                        bytes_written: offset,
+                        total_bytes,
+                        bytes_per_sec: bytes_since_last_report as f64 / elapsed,
+                        phase: FlashPhase::Writing,
+                    })
+                    .await
+                    .map_err(|_| FlashError::SendChannelError)?;
+                bytes_since_last_report = 0;
+                timer = std::time::Instant::now();
+            }
+        }
+        on_progress
+            .send(FlashProgress::transition(FlashPhase::Flushing))
+            .await
+            .map_err(|_| FlashError::SendChannelError)?;
+        writter.flush().await?;
+        let mut handle = writter.into_inner();
+        handle.flush_to_disk()?;
+
+        on_progress
+            .send(FlashProgress::transition(FlashPhase::Verifying))
+            .await
+            .map_err(|_| FlashError::SendChannelError)?;
+
+        let source = reader.into_inner();
+        self.verify(&mut handle, source, offset).await?;
+
+        self.ejector.eject(device)?;
+
+        on_progress
+            .send(FlashProgress::transition(FlashPhase::Done))
+            .await
+            .map_err(|_| FlashError::SendChannelError)?;
+        Ok(())
+    }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Alignment helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Round `n` down to the nearest multiple of `align`.
-///
-/// `align` **must** be a power of two; this is asserted in debug builds.
 #[inline]
 pub(crate) fn align_down(n: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two(), "align must be a power of two");
     n & !(align - 1)
 }
 
-/// Round `n` up to the nearest multiple of `align`.
-///
-/// `align` **must** be a power of two; this is asserted in debug builds.
 #[inline]
 pub(crate) fn align_up(n: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two(), "align must be a power of two");
