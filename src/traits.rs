@@ -1,3 +1,5 @@
+use futures::Stream;
+
 use crate::{
     data_types::{
         BlockDevice,
@@ -48,13 +50,25 @@ pub trait DeviceWriter {
 pub trait DeviceEnumerator {
     /// list all storage devices
     fn list_devices(&self) -> FlashResult<Vec<BlockDevice>>;
-
+}
+/// listening devices async
+pub trait AsyncDeviceEnumerator {
+    /// the stream to give back of the events
+    type WatchStream: Stream<Item = DeviceEvent> + Send + Unpin + 'static;
+    /// watches a device async
+    ///
     /// Watch for hotplug events (USB insert/remove).
     /// Returns a channel receiver; caller drops it to stop watching.
-    fn watch_devices(&self) -> FlashResult<std::sync::mpsc::Receiver<DeviceEvent>> {
-        // Default: unsupported — platforms can opt in
-        Err(FlashError::UnsportedFeature)
-    }
+    fn watch_devices(
+        &self,
+    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_;
+    /// Gives at startup the devices back and then watching
+    ///
+    /// Watch for hotplug events (USB insert/remove).
+    /// Returns a channel receiver; caller drops it to stop watching.
+    fn watch_devices_with_initial(
+        &self,
+    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_;
 }
 /// Unmount all filesystems on a device before writing.
 ///   Linux   → umount2() syscall via nix

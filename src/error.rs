@@ -33,8 +33,6 @@ pub enum FlashError {
         expected_hex: String,
     },
 
-    #[error("Libary feature not for this backend implemented")]
-    UnsportedFeature,
     #[error("A error with synchronisation has accourd")]
     SyncError,
 
