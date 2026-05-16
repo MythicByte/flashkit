@@ -451,14 +451,3 @@ where
         Ok(())
     }
 }
-// #[inline]
-// pub(crate) fn align_down(n: usize, align: usize) -> usize {
-//     debug_assert!(align.is_power_of_two(), "align must be a power of two");
-//     n & !(align - 1)
-// }
-
-// #[inline]
-// pub(crate) fn align_up(n: usize, align: usize) -> usize {
-//     debug_assert!(align.is_power_of_two(), "align must be a power of two");
-//     (n + align - 1) & !(align - 1)
-// }
