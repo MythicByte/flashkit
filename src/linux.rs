@@ -306,6 +306,15 @@ fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashE
     }
     Ok(None)
 }
+impl std::io::Write for LinuxRawWriteHandle {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -250,6 +250,11 @@ impl FlashProgress {
         self.phase.clone()
     }
 }
+impl<R: std::io::Read> std::io::Read for ImageSourceFile<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
 /// generates from bytes rounded biggest value
 #[must_use]
 pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
