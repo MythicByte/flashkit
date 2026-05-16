@@ -7,6 +7,7 @@ use std::{
 };
 
 use tokio::io::{
+    AsyncBufRead,
     AsyncRead,
     AsyncReadExt,
 };
@@ -52,7 +53,7 @@ where
 #[derive(Debug)]
 pub struct AsyncImageSourceFile<R>
 where
-    R: AsyncRead + AsyncReadExt,
+    R: AsyncRead + AsyncReadExt + AsyncBufRead,
 {
     /// file pointer
     reader: R,
@@ -190,7 +191,7 @@ impl<R: Read> ImageSourceFile<R> {
         }
     }
 }
-impl<R: AsyncRead + AsyncReadExt> AsyncImageSourceFile<R> {
+impl<R: AsyncRead + AsyncReadExt + AsyncBufRead> AsyncImageSourceFile<R> {
     /// default constructor
     pub fn new(reader: R, uncompressed_size: u64, expected_hash: Option<[u8; 32]>) -> Self {
         Self {
