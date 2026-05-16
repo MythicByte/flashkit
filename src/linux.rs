@@ -16,14 +16,12 @@ use rustix::{
     mount::UnmountFlags,
     path::Arg,
 };
-use tracing::{
-    instrument,
-    warn,
-};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
     data_types::{
         BlockDevice,
+        DeviceEvent,
         MountedPartition,
     },
     error::{
@@ -31,6 +29,7 @@ use crate::{
         FlashResult,
     },
     traits::{
+        AsyncDeviceEnumerator,
         DeviceEjector,
         DeviceEnumerator,
         DeviceUnmounter,
@@ -42,7 +41,7 @@ use crate::{
 #[derive(Debug)]
 pub struct LinuxRawWriteHandle {
     file: fs::File,
-    phyisical_sector_size: u32,
+    phyisical_sector_size: usize,
     size_bytes: u64,
 }
 /// How to enumerate a device
@@ -60,7 +59,6 @@ pub struct LinuxDeviceEjector;
 impl LinuxDeviceEnumerator {
     /// name of the usb device
     // TODO: Check later if correct or remove
-    #[instrument(ret)]
     fn name(mut path: PathBuf) -> Result<String, FlashError> {
         path.push("device/model");
         let file_output = fs::read_to_string(path)?;
@@ -68,7 +66,6 @@ impl LinuxDeviceEnumerator {
     }
     /// the dev path
     // TODO: Better error handeling with the string
-    #[instrument(ret)]
     fn path(path: PathBuf) -> Option<PathBuf> {
         // 3 needed from getting /sys/block/xy the xy
         let path = path.components().nth(3)?;
@@ -78,14 +75,12 @@ impl LinuxDeviceEnumerator {
         Some(output)
     }
     /// gets physical sector size
-    #[instrument(ret)]
-    fn sector_size(mut path: PathBuf) -> Result<u32, FlashError> {
+    fn sector_size(mut path: PathBuf) -> Result<usize, FlashError> {
         path.push("queue/logical_block_size");
         let content_file = fs::read_to_string(path)?;
-        let output = content_file.trim().parse::<u32>()?;
+        let output = content_file.trim().parse::<usize>()?;
         Ok(output)
     }
-    #[instrument(ret)]
     fn get_size_bytes(mut path: PathBuf) -> Result<u64, FlashError> {
         const SECTOR_SIZE: u64 = 512;
         path.push("size");
@@ -97,7 +92,6 @@ impl LinuxDeviceEnumerator {
         Ok(bytes_parsed)
     }
     /// if the storage device can be removed
-    #[instrument(ret)]
     fn removable_status(mut path: PathBuf) -> Result<bool, FlashError> {
         path.push("removable");
         let read_status = fs::read_to_string(path)?;
@@ -109,7 +103,6 @@ impl LinuxDeviceEnumerator {
     }
 }
 impl DeviceEnumerator for LinuxDeviceEnumerator {
-    #[instrument(ret)]
     fn list_devices(&self) -> crate::error::FlashResult<Vec<crate::data_types::BlockDevice>> {
         const SYS_PATH: &str = "/sys/block/";
         let block_devices_found = std::fs::read_dir(SYS_PATH)?;
@@ -140,9 +133,39 @@ impl DeviceEnumerator for LinuxDeviceEnumerator {
             })
             .collect())
     }
-    // fn watch_devices(&self) -> FlashResult<std::sync::mpsc::Receiver<DeviceEvent>> {
-    //     todo!()
-    // }
+}
+impl AsyncDeviceEnumerator for LinuxDeviceEnumerator {
+    type WatchStream = ReceiverStream<DeviceEvent>;
+
+    //TODO: finish application
+    fn watch_devices(
+        &self,
+    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_ {
+        async {
+            let (tx, rx) = tokio::sync::mpsc::channel(30);
+            todo!();
+            Ok(ReceiverStream::new(rx))
+        }
+    }
+
+    //TODO: finish application
+    fn watch_devices_with_initial(
+        &self,
+    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_ {
+        async {
+            let (tx, rx) = tokio::sync::mpsc::channel(30);
+            let devices = LinuxDeviceEnumerator.list_devices()?;
+            tokio::spawn(async move {
+                for device in devices.into_iter().filter(|x| x.is_removable) {
+                    if tx.send(DeviceEvent::Added(device)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            todo!();
+            Ok(ReceiverStream::new(rx))
+        }
+    }
 }
 #[allow(clippy::redundant_pattern)]
 impl DeviceUnmounter for LinuxDeviceUnmounter {
@@ -185,7 +208,7 @@ impl RawWriteHandle for LinuxRawWriteHandle {
         self.file.sync_all().map_err(FlashError::Io)
     }
 
-    fn sector_size(&self) -> u32 {
+    fn sector_size(&self) -> usize {
         self.phyisical_sector_size
     }
 
@@ -243,7 +266,6 @@ impl DeviceEjector for LinuxDeviceEjector {
     }
 }
 /// Check if mounted
-#[instrument(ret)]
 fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashError> {
     let path_selected = path
         .components()
@@ -261,7 +283,6 @@ fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashE
         return Err(FlashError::DeviceNotFound(dev_path_search));
     }
     let search_string_from_path = dev_path_search.to_str();
-    warn!("{:?}", search_string_from_path);
     if let Some(correct_device_path) = search_string_from_path {
         let output: Vec<MountedPartition> = mounted_devices
             .lines()
@@ -279,12 +300,21 @@ fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashE
             })
             .collect();
         // chekcs if a mounted partition is there
-        if output.is_empty() {
+        if !output.is_empty() {
             return Ok(Some(output));
         }
     }
     Ok(None)
 }
+impl std::io::Write for LinuxRawWriteHandle {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

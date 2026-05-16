@@ -33,8 +33,6 @@ pub enum FlashError {
         expected_hex: String,
     },
 
-    #[error("Libary feature not for this backend implemented")]
-    UnsportedFeature,
     #[error("A error with synchronisation has accourd")]
     SyncError,
 
@@ -46,6 +44,10 @@ pub enum FlashError {
 
     #[error(transparent)]
     TryInt(#[from] std::num::TryFromIntError),
+
+    #[error("Sending with channel failed")]
+    SendChannelError,
+
     #[error("A array was accesed out of bounds")]
     OutOfBoundsArray,
 }
