@@ -10,6 +10,7 @@ use futures::Stream;
 use tokio::io::{
     AsyncBufReadExt,
     AsyncReadExt,
+    AsyncSeekExt,
     AsyncWriteExt,
 };
 
@@ -368,6 +369,7 @@ where
         <W as DeviceWriter>::Handle: tokio::io::AsyncWrite,
         <W as DeviceWriter>::Handle: Unpin,
         <W as DeviceWriter>::Handle: tokio::io::AsyncRead,
+        <W as DeviceWriter>::Handle: tokio::io::AsyncSeek,
     {
         on_progress
             .send(FlashProgress::transition(FlashPhase::Unmounting))
@@ -403,27 +405,21 @@ where
         let mut status_read_back: usize = usize::MAX;
         let mut buffer = vec![0u8; sector_size];
         while status_read_back != 0 {
-            match reader.read_exact(&mut buffer).await {
+            match reader.read(&mut buffer).await {
+                Ok(0) => break,
                 Ok(number_read) => {
+                    let buffer_write = match buffer.get(..number_read) {
+                        Some(x) => x,
+                        None => return Err(FlashError::OutOfBoundsArray),
+                    };
                     status_read_back = number_read;
-                    writter.write_all(&buffer).await?;
-                    offset += sector_size as u64;
+                    writter.write_all(buffer_write).await?;
+                    offset += number_read as u64;
+                    bytes_since_last_report += number_read as u64;
                 }
                 Err(error) => {
-                    match error.kind() {
-                        io::ErrorKind::UnexpectedEof => {
-                            let read_backup = reader.read(&mut buffer).await?;
-                            offset += read_backup as u64;
-                            buffer
-                                .get_mut(read_backup..sector_size)
-                                .ok_or(FlashError::OutOfBoundsArray)?
-                                .fill(0);
-                            writter.write_all(&buffer).await?;
-                            status_read_back = 0;
-                        }
-                        _ => (),
-                    }
-                    tracing::error!("{}", error);
+                    tracing::error!("Read error: {}", error);
+                    return Err(FlashError::Io(error));
                 }
             }
 
@@ -449,6 +445,7 @@ where
         writter.flush().await?;
         let mut handle = writter.into_inner();
         handle.flush_to_disk()?;
+        handle.seek(io::SeekFrom::Start(0)).await?;
 
         on_progress
             .send(FlashProgress::transition(FlashPhase::Verifying))
