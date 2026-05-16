@@ -343,6 +343,7 @@ where
                 timer = std::time::Instant::now();
             }
             reader.consume(reader.buffer().len());
+            reader.fill_buf().await?;
         }
 
         let actual = hasher.finalize();
