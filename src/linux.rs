@@ -16,10 +16,12 @@ use rustix::{
     mount::UnmountFlags,
     path::Arg,
 };
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
     data_types::{
         BlockDevice,
+        DeviceEvent,
         MountedPartition,
     },
     error::{
@@ -27,6 +29,7 @@ use crate::{
         FlashResult,
     },
     traits::{
+        AsyncDeviceEnumerator,
         DeviceEjector,
         DeviceEnumerator,
         DeviceUnmounter,
@@ -130,9 +133,36 @@ impl DeviceEnumerator for LinuxDeviceEnumerator {
             })
             .collect())
     }
-    // fn watch_devices(&self) -> FlashResult<std::sync::mpsc::Receiver<DeviceEvent>> {
-    //     todo!()
-    // }
+}
+impl AsyncDeviceEnumerator for LinuxDeviceEnumerator {
+    type WatchStream = ReceiverStream<DeviceEvent>;
+
+    fn watch_devices(
+        &self,
+    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_ {
+        async {
+            let (tx, rx) = tokio::sync::mpsc::channel(30);
+
+            Ok(ReceiverStream::new(rx))
+        }
+    }
+
+    fn watch_devices_with_initial(
+        &self,
+    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_ {
+        async {
+            let (tx, rx) = tokio::sync::mpsc::channel(30);
+            let devices = LinuxDeviceEnumerator.list_devices()?;
+            tokio::spawn(async move {
+                for device in devices.into_iter().filter(|x| x.is_removable) {
+                    if tx.send(DeviceEvent::Added(device)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok(ReceiverStream::new(rx))
+        }
+    }
 }
 #[allow(clippy::redundant_pattern)]
 impl DeviceUnmounter for LinuxDeviceUnmounter {
