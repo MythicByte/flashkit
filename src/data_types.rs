@@ -106,6 +106,24 @@ impl FlashProgress {
     }
 }
 impl BlockDevice {
+    /// constructor
+    pub fn new(
+        path: PathBuf,
+        name: String,
+        size_bytes: u64,
+        is_removable: bool,
+        is_mounted: Option<Vec<MountedPartition>>,
+        sector_size: u32,
+    ) -> Self {
+        Self {
+            path,
+            name,
+            size_bytes,
+            is_removable,
+            is_mounted,
+            sector_size,
+        }
+    }
     /// Gets the byte size and rounded down
     #[must_use]
     pub fn get_sizes(&self) -> Size {
