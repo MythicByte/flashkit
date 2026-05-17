@@ -119,7 +119,7 @@ pub trait ImageSource {
     }
 }
 /// Generic Flasher
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Flasher<E, U, W, J>
 where
     E: DeviceEnumerator,
