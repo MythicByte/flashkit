@@ -170,19 +170,38 @@ impl AsyncDeviceEnumerator for LinuxDeviceEnumerator {
 #[allow(clippy::redundant_pattern)]
 impl DeviceUnmounter for LinuxDeviceUnmounter {
     fn unmount_all(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
-        rustix::mount::unmount(device.path.clone(), UnmountFlags::NOFOLLOW).map_err(|value| {
-            match value.kind() {
-                std::io::ErrorKind::NotFound => FlashError::DeviceNotFound(device.path.clone()),
-                std::io::ErrorKind::PermissionDenied => FlashError::InsufficientPrivileges,
-                std::io::ErrorKind::ResourceBusy => FlashError::DeviceBusy {
-                    path: device.path.clone(),
-                },
-                error @ _ => FlashError::UnmountFailed {
-                    device: device.path.clone(),
-                    reason: error.to_string(),
-                },
-            }
-        })
+        let mount_points = match &device.is_mounted {
+            Some(mount_points) => mount_points,
+            None => return Ok(()),
+        };
+        let test: Result<(), FlashError> = mount_points
+            .into_iter()
+            .map(|x| {
+                rustix::mount::unmount(x.mount_point.clone(), UnmountFlags::NOFOLLOW).map_err(
+                    |value| match value.kind() {
+                        std::io::ErrorKind::NotFound => {
+                            FlashError::DeviceNotFound(device.path.clone())
+                        }
+                        std::io::ErrorKind::PermissionDenied => FlashError::InsufficientPrivileges,
+                        std::io::ErrorKind::ResourceBusy => FlashError::DeviceBusy {
+                            path: device.path.clone(),
+                        },
+                        error @ _ => FlashError::UnmountFailed {
+                            device: device.path.clone(),
+                            reason: error.to_string(),
+                        },
+                    },
+                )
+            })
+            .collect();
+        // TODO: fix later
+        match test {
+            Ok(_) => Ok(()),
+            Err(e) => Err(FlashError::UnmountFailed {
+                device: "".into(),
+                reason: e.to_string(),
+            }),
+        }
     }
 
     fn check_is_fully_unmounted(
