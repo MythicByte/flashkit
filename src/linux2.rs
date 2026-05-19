@@ -1,10 +1,6 @@
 use std::{
     collections::HashMap,
     io::SeekFrom,
-    os::{
-        fd::AsRawFd,
-        unix::io::FromRawFd,
-    },
     path::Path,
     pin::Pin,
     task::{
@@ -39,7 +35,7 @@ use crate::{
         RawWriteHandle,
     },
 };
-
+#[allow(missing_docs)]
 #[derive(Debug)]
 pub struct LinuxRawWriteHandle {
     file: tokio::fs::File,
@@ -115,6 +111,7 @@ pub struct LinuxDBus {
 }
 
 impl LinuxDBus {
+    #[allow(missing_docs)]
     pub async fn new() -> FlashResult<Self> {
         let connection = zbus::Connection::system().await?;
         Ok(Self { connection })

@@ -59,8 +59,5 @@ pub type OsFlasher = Flasher<Interface>;
 #[must_use]
 pub async fn flash() -> FlashResult<OsFlasher> {
     let device = Interface::new().await?;
-    Ok(Flasher::new(
-        device,
-        1024 * 1024, // 1MB default chunk size
-    ))
+    Ok(Flasher::new(device, 8 * 1024 * 1024))
 }
