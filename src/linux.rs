@@ -1,35 +1,33 @@
 use std::{
-    fs::{
-        self,
-        File,
-        OpenOptions,
+    collections::HashMap,
+    io::SeekFrom,
+    path::Path,
+    pin::Pin,
+    task::{
+        Context,
+        Poll,
     },
-    os::unix::fs::{
-        FileExt,
-        OpenOptionsExt,
-    },
-    path::PathBuf,
 };
 
-use rustix::{
-    fs::FlockOperation,
-    mount::UnmountFlags,
-    path::Arg,
+use tokio::io::{
+    AsyncReadExt,
+    AsyncSeekExt,
+    AsyncWriteExt,
+    ReadBuf,
 };
-use tokio_stream::wrappers::ReceiverStream;
+use zbus::zvariant::{
+    OwnedObjectPath,
+    OwnedValue,
+};
+use zvariant::OwnedFd;
 
 use crate::{
-    data_types::{
-        BlockDevice,
-        DeviceEvent,
-        MountedPartition,
-    },
+    data_types::BlockDevice,
     error::{
         FlashError,
         FlashResult,
     },
     traits::{
-        AsyncDeviceEnumerator,
         DeviceEjector,
         DeviceEnumerator,
         DeviceUnmounter,
@@ -37,323 +35,339 @@ use crate::{
         RawWriteHandle,
     },
 };
-/// Linux Raw File Handle
+#[allow(missing_docs)]
 #[derive(Debug)]
 pub struct LinuxRawWriteHandle {
-    file: fs::File,
-    phyisical_sector_size: usize,
+    file: tokio::fs::File,
+    sector_size: usize,
     size_bytes: u64,
 }
-/// How to enumerate a device
-#[derive(Debug)]
-pub struct LinuxDeviceEnumerator;
-/// The unmounter implementation
-#[derive(Debug)]
-pub struct LinuxDeviceUnmounter;
-/// THe writer implementation
-#[derive(Debug)]
-pub struct LinuxDeviceWriter;
-/// how the disk is ejected
-#[derive(Debug)]
-pub struct LinuxDeviceEjector;
-impl LinuxDeviceEnumerator {
-    /// name of the usb device
-    // TODO: Check later if correct or remove
-    fn name(mut path: PathBuf) -> Result<String, FlashError> {
-        path.push("device/model");
-        let file_output = fs::read_to_string(path)?;
-        Ok(file_output.trim().into())
-    }
-    /// the dev path
-    // TODO: Better error handeling with the string
-    fn path(path: PathBuf) -> Option<PathBuf> {
-        // 3 needed from getting /sys/block/xy the xy
-        let path = path.components().nth(3)?;
-        let mut output = PathBuf::new();
-        output.push("/dev");
-        output.push(&*path.to_string_lossy());
-        Some(output)
-    }
-    /// gets physical sector size
-    fn sector_size(mut path: PathBuf) -> Result<usize, FlashError> {
-        path.push("queue/logical_block_size");
-        let content_file = fs::read_to_string(path)?;
-        let output = content_file.trim().parse::<usize>()?;
-        Ok(output)
-    }
-    fn get_size_bytes(mut path: PathBuf) -> Result<u64, FlashError> {
-        const SECTOR_SIZE: u64 = 512;
-        path.push("size");
-        let file_output = fs::read_to_string(path)?;
-        let bytes_parsed = file_output
-            .trim()
-            .parse::<u64>()?
-            .saturating_mul(SECTOR_SIZE);
-        Ok(bytes_parsed)
-    }
-    /// if the storage device can be removed
-    fn removable_status(mut path: PathBuf) -> Result<bool, FlashError> {
-        path.push("removable");
-        let read_status = fs::read_to_string(path)?;
-        let output: u8 = read_status.trim().parse::<u8>()?;
-        if output == 1 {
-            return Ok(true);
-        }
-        Ok(false)
-    }
-}
-impl DeviceEnumerator for LinuxDeviceEnumerator {
-    fn list_devices(&self) -> crate::error::FlashResult<Vec<crate::data_types::BlockDevice>> {
-        const SYS_PATH: &str = "/sys/block/";
-        let block_devices_found = std::fs::read_dir(SYS_PATH)?;
-        Ok(block_devices_found
-            .filter_map(|entry| match entry {
-                Ok(correct_entry) => {
-                    let path = correct_entry.path();
-                    let file_name = correct_entry.file_name();
-                    let file_name_string_lossy = file_name.to_string_lossy();
-                    if file_name_string_lossy.starts_with("loop")
-                        || file_name_string_lossy.starts_with("ram")
-                        || file_name_string_lossy.starts_with("zram")
-                    {
-                        return None;
-                    }
-
-                    let output = BlockDevice {
-                        path: Self::path(path.clone())?,
-                        name: Self::name(path).ok()?,
-                        size_bytes: Self::get_size_bytes(correct_entry.path()).ok()?,
-                        is_removable: Self::removable_status(correct_entry.path()).ok()?,
-                        is_mounted: mounted_status(correct_entry.path()).ok()?,
-                        sector_size: Self::sector_size(correct_entry.path()).ok()?,
-                    };
-                    Some(output)
-                }
-                Err(_) => None,
-            })
-            .collect())
-    }
-}
-impl AsyncDeviceEnumerator for LinuxDeviceEnumerator {
-    type WatchStream = ReceiverStream<DeviceEvent>;
-
-    //TODO: finish application
-    fn watch_devices(
+#[zbus::proxy(
+    interface = "org.freedesktop.UDisks2.Manager",
+    default_service = "org.freedesktop.UDisks2",
+    default_path = "/org/freedesktop/UDisks2/Manager"
+)]
+trait UDisks2Manager {
+    #[zbus(name = "GetBlockDevices")]
+    fn get_block_devices(
         &self,
-    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_ {
-        async {
-            let (tx, rx) = tokio::sync::mpsc::channel(30);
-            todo!();
-            Ok(ReceiverStream::new(rx))
-        }
-    }
-
-    //TODO: finish application
-    fn watch_devices_with_initial(
+        options: &HashMap<String, OwnedValue>,
+    ) -> zbus::Result<Vec<OwnedObjectPath>>;
+}
+#[zbus::proxy(
+    interface = "org.freedesktop.UDisks2.Block",
+    default_service = "org.freedesktop.UDisks2"
+)]
+trait UDisks2Block {
+    #[zbus(name = "OpenDevice")]
+    fn open_device(
         &self,
-    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_ {
-        async {
-            let (tx, rx) = tokio::sync::mpsc::channel(30);
-            let devices = LinuxDeviceEnumerator.list_devices()?;
-            tokio::spawn(async move {
-                for device in devices.into_iter().filter(|x| x.is_removable) {
-                    if tx.send(DeviceEvent::Added(device)).await.is_err() {
-                        break;
-                    }
-                }
-            });
-            todo!();
-            Ok(ReceiverStream::new(rx))
-        }
+        mode: &str,
+        options: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    ) -> zbus::Result<zbus::zvariant::OwnedFd>;
+
+    #[zbus(property)]
+    fn device(&self) -> zbus::Result<Vec<u8>>;
+    #[zbus(property)]
+    fn size(&self) -> zbus::Result<u64>;
+    #[zbus(property)]
+    fn hw_sector_size(&self) -> zbus::Result<u32>;
+    #[zbus(property)]
+    fn drive(&self) -> zbus::Result<zbus::zvariant::ObjectPath<'_>>;
+}
+#[zbus::proxy(
+    interface = "org.freedesktop.UDisks2.Drive",
+    default_service = "org.freedesktop.UDisks2"
+)]
+trait UDisks2Drive {
+    #[zbus(property)]
+    fn model(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn removable(&self) -> zbus::Result<bool>;
+    #[zbus(name = "Eject")]
+    fn eject(
+        &self,
+        options: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    ) -> zbus::Result<()>;
+}
+#[zbus::proxy(
+    interface = "org.freedesktop.UDisks2.Filesystem",
+    default_service = "org.freedesktop.UDisks2"
+)]
+trait UDisks2Filesystem {
+    #[zbus(property)]
+    fn mount_points(&self) -> zbus::Result<Vec<Vec<u8>>>;
+    #[zbus(name = "Unmount")]
+    fn unmount(
+        &self,
+        options: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    ) -> zbus::Result<()>;
+}
+
+/// Linux a connection to the d bus system bus
+#[derive(Debug, Clone)]
+pub struct LinuxDBus {
+    connection: zbus::Connection,
+}
+
+impl LinuxDBus {
+    #[allow(missing_docs)]
+    pub async fn new() -> FlashResult<Self> {
+        let connection = zbus::Connection::system().await?;
+        Ok(Self { connection })
     }
 }
-#[allow(clippy::redundant_pattern)]
-impl DeviceUnmounter for LinuxDeviceUnmounter {
-    fn unmount_all(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
-        let mount_points = match &device.is_mounted {
-            Some(mount_points) => mount_points,
-            None => return Ok(()),
-        };
-        let test: Result<(), FlashError> = mount_points
-            .into_iter()
-            .map(|x| {
-                rustix::mount::unmount(x.mount_point.clone(), UnmountFlags::NOFOLLOW).map_err(
-                    |value| match value.kind() {
-                        std::io::ErrorKind::NotFound => {
-                            FlashError::DeviceNotFound(device.path.clone())
+impl DeviceEnumerator for LinuxDBus {
+    async fn list_devices(&self) -> FlashResult<Vec<crate::data_types::BlockDevice>> {
+        let manager = UDisks2ManagerProxy::new(&self.connection).await?;
+        let all_devices = manager.get_block_devices(&HashMap::new()).await?;
+        let mut devices = Vec::new();
+        for obj_path in all_devices {
+            let block_proxy = UDisks2BlockProxy::builder(&self.connection)
+                .path(obj_path.as_str())?
+                .build()
+                .await?;
+
+            let device_bytes = block_proxy.device().await.unwrap_or_default(); // Vec<u8>
+            let path_str = String::from_utf8_lossy(&device_bytes).to_string();
+
+            let trimmed = path_str.trim_end_matches('\0');
+            let path = std::path::PathBuf::from(&trimmed);
+            if trimmed.starts_with("/dev/loop")
+                || trimmed.starts_with("/dev/ram")
+                || trimmed.starts_with("/dev/zram")
+                || trimmed.chars().last().unwrap_or(' ').is_ascii_digit()
+            {
+                continue;
+            }
+
+            let size_bytes = block_proxy.size().await.unwrap_or(0);
+            let sector_size = block_proxy.hw_sector_size().await.unwrap_or(512) as usize;
+            let drive_obj_path = block_proxy.drive().await?;
+            let drive_proxy = UDisks2DriveProxy::builder(&self.connection)
+                .path(drive_obj_path.as_str())?
+                .build()
+                .await?;
+            let name = drive_proxy
+                .model()
+                .await
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            let is_removable = drive_proxy.removable().await.unwrap_or(false);
+
+            let bd = BlockDevice {
+                path,
+                name,
+                size_bytes,
+                is_removable,
+                sector_size,
+            };
+            devices.push(bd);
+        }
+        Ok(devices)
+    }
+}
+impl DeviceUnmounter for LinuxDBus {
+    async fn unmount(&self, device: &BlockDevice) -> FlashResult<()> {
+        let dev_filename = device
+            .path
+            .file_name()
+            .ok_or_else(|| FlashError::DeviceBusy {
+                path: device.path.clone(),
+            })?
+            .to_string_lossy();
+        let dev_obj_path = format!("/org/freedesktop/UDisks2/block_devices/{}", dev_filename);
+
+        let manager = UDisks2ManagerProxy::new(&self.connection).await?;
+        let all_devices = manager.get_block_devices(&HashMap::new()).await?;
+
+        let disk_block_proxy = UDisks2BlockProxy::builder(&self.connection)
+            .path(dev_obj_path.as_str())?
+            .build()
+            .await?;
+        let drive_obj_path = disk_block_proxy.drive().await?;
+
+        for obj_path in all_devices {
+            let block_proxy = match UDisks2BlockProxy::builder(&self.connection)
+                .path(obj_path.as_str())?
+                .build()
+                .await
+            {
+                Ok(proxy) => proxy,
+                Err(_) => continue,
+            };
+
+            let their_drive = block_proxy.drive().await.ok();
+            if their_drive != Some(drive_obj_path.clone()) {
+                continue;
+            }
+
+            let child_dev_bytes = block_proxy.device().await.unwrap_or_default();
+            let child_dev_str = String::from_utf8_lossy(&child_dev_bytes);
+            if Path::new(child_dev_str.trim_end_matches("\0")) == device.path {
+                continue;
+            }
+
+            if let Ok(fs_proxy) = UDisks2FilesystemProxy::builder(&self.connection)
+                .path(obj_path.as_str())?
+                .build()
+                .await
+            {
+                let mps = fs_proxy.mount_points().await.unwrap_or_default();
+                if !mps.is_empty() {
+                    // Mounted, so unmount
+                    fs_proxy.unmount(&HashMap::new()).await.map_err(|_| {
+                        FlashError::DeviceBusy {
+                            path: child_dev_str.trim_end_matches("\0").into(),
                         }
-                        std::io::ErrorKind::PermissionDenied => FlashError::InsufficientPrivileges,
-                        std::io::ErrorKind::ResourceBusy => FlashError::DeviceBusy {
-                            path: device.path.clone(),
-                        },
-                        error @ _ => FlashError::UnmountFailed {
-                            device: device.path.clone(),
-                            reason: error.to_string(),
-                        },
-                    },
-                )
-            })
-            .collect();
-        // TODO: fix later
-        match test {
-            Ok(_) => Ok(()),
-            Err(e) => Err(FlashError::UnmountFailed {
-                device: "".into(),
-                reason: e.to_string(),
-            }),
+                    })?;
+                }
+            }
         }
+        Ok(())
     }
+}
+impl DeviceEjector for LinuxDBus {
+    async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
+        let dev_filename = device
+            .path
+            .file_name()
+            .ok_or_else(|| FlashError::DeviceBusy {
+                path: device.path.clone(),
+            })?
+            .to_string_lossy();
+        let dev_obj_path = format!("/org/freedesktop/UDisks2/block_devices/{}", dev_filename);
 
-    fn check_is_fully_unmounted(
-        &self,
-        device: &crate::data_types::BlockDevice,
-    ) -> FlashResult<bool> {
-        // None means no mount here, Some(_) gives back the mount points
-        Ok(mounted_status(device.path.clone())?.is_none())
+        let block_proxy = UDisks2BlockProxy::builder(&self.connection)
+            .path(dev_obj_path.as_str())?
+            .build()
+            .await?;
+
+        let drive_obj_path = block_proxy.drive().await?;
+
+        let drive_proxy = UDisks2DriveProxy::builder(&self.connection)
+            .path(drive_obj_path.as_str())?
+            .build()
+            .await?;
+
+        drive_proxy
+            .eject(&HashMap::new())
+            .await
+            .map_err(|_| FlashError::DeviceBusy {
+                path: device.path.clone(),
+            })?;
+
+        Ok(())
     }
 }
 impl RawWriteHandle for LinuxRawWriteHandle {
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
+    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
         self.file
-            .write_all_at(buf, offset)
-            .map_err(|source| FlashError::WriteFailed { offset, source })
+            .seek(SeekFrom::Start(offset))
+            .await
+            .map_err(FlashError::Io)?;
+        self.file.write_all(buf).await.map_err(FlashError::Io)?;
+
+        Ok(())
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<()> {
-        self.file.read_exact_at(buf, offset).map_err(FlashError::Io)
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<()> {
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .await
+            .map_err(FlashError::Io)?;
+        self.file.read_exact(buf).await.map_err(FlashError::Io)?;
+        Ok(())
     }
 
-    fn flush_to_disk(&mut self) -> FlashResult<()> {
-        self.file.sync_all().map_err(FlashError::Io)
+    async fn flush_to_disk(&mut self) -> FlashResult<()> {
+        self.file.sync_all().await?;
+        Ok(())
     }
 
     fn sector_size(&self) -> usize {
-        self.phyisical_sector_size
+        self.sector_size
     }
 
     fn size_bytes(&self) -> FlashResult<u64> {
         Ok(self.size_bytes)
     }
 }
-impl DeviceWriter for LinuxDeviceWriter {
+impl DeviceWriter for LinuxDBus {
     type Handle = LinuxRawWriteHandle;
 
-    #[allow(clippy::redundant_pattern)]
-    fn open_for_writing(
-        &self,
-        device: &crate::data_types::BlockDevice,
-    ) -> FlashResult<Self::Handle> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            //Linux 2.6 and later  if the block device is in use by the system like mounted fails with the error EBUSY
-            .custom_flags(rustix::fs::OFlags::EXCL.bits().try_into()?)
-            .open(device.path.clone())
-            .map_err(|_| FlashError::InsufficientPrivileges)?;
+    async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
+        let dev_filename = device
+            .path
+            .file_name()
+            .ok_or_else(|| FlashError::DeviceNotFound(device.path.clone()))?
+            .to_string_lossy();
+        let dev_obj_path = format!("/org/freedesktop/UDisks2/block_devices/{}", dev_filename);
 
-        //TODO: test if flock works or ioctl is needed
-        if let Err(error) = rustix::fs::flock(&file, FlockOperation::LockExclusive) {
-            let error_back = match error.kind() {
-                std::io::ErrorKind::NotFound => FlashError::DeviceNotFound(device.path.clone()),
-                std::io::ErrorKind::PermissionDenied => FlashError::InsufficientPrivileges,
-                std::io::ErrorKind::ResourceBusy => FlashError::DeviceBusy {
-                    path: device.path.clone(),
-                },
-                error @ _ => FlashError::FileLockFailed {
-                    device: device.path.clone(),
-                    reason: error.to_string(),
-                },
-            };
-            return Err(error_back);
-        }
+        // 2. Create UDisks2BlockProxy for it
+        let block_proxy = UDisks2BlockProxy::builder(&self.connection)
+            .path(dev_obj_path.as_str())?
+            .build()
+            .await?;
+
+        // 3. Open device via D-Bus
+        let fd: OwnedFd = block_proxy
+            .open_device("rw", &HashMap::new())
+            .await
+            .map_err(FlashError::Zbus)?;
+        let std_fd: std::os::fd::OwnedFd = fd.into();
+        let file = tokio::fs::File::from(std::fs::File::from(std_fd));
 
         Ok(LinuxRawWriteHandle {
             file,
-            phyisical_sector_size: device.sector_size,
+            sector_size: device.sector_size,
             size_bytes: device.size_bytes,
         })
     }
 }
-impl DeviceEjector for LinuxDeviceEjector {
-    /// check that safe to eject device
-    fn eject(&self, device: &crate::data_types::BlockDevice) -> FlashResult<()> {
-        let file = File::open(device.path.clone())?;
-        if rustix::fs::fsync(file).is_err() {
-            return Err(FlashError::SyncError);
-        }
-        Ok(())
+impl tokio::io::AsyncRead for LinuxRawWriteHandle {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.file).poll_read(cx, buf)
     }
 }
-/// Check if mounted
-fn mounted_status(path: PathBuf) -> Result<Option<Vec<MountedPartition>>, FlashError> {
-    let path_selected = path
-        .components()
-        .nth(3)
-        .ok_or(FlashError::DeviceNotFound(path.clone()))?;
-    let mounted_devices = fs::read_to_string("/proc/mounts")?;
-    let device = path_selected
-        .as_os_str()
-        .to_str()
-        .ok_or(FlashError::DeviceNotFound(path.clone()))?;
-    let mut dev_path_search = PathBuf::new();
-    dev_path_search.push("/dev");
-    dev_path_search.push(device);
-    if !dev_path_search.exists() {
-        return Err(FlashError::DeviceNotFound(dev_path_search));
+
+impl tokio::io::AsyncWrite for LinuxRawWriteHandle {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.file).poll_write(cx, buf)
     }
-    let search_string_from_path = dev_path_search.to_str();
-    if let Some(correct_device_path) = search_string_from_path {
-        let output: Vec<MountedPartition> = mounted_devices
-            .lines()
-            .filter_map(|line| {
-                let mut lines = line.split_whitespace();
-                let device = lines.next()?;
-                if !device.starts_with(correct_device_path) {
-                    return None;
-                };
-                let mount_point = lines.next()?;
-                Some(MountedPartition {
-                    device_path: device.into(),
-                    mount_point: mount_point.into(),
-                })
-            })
-            .collect();
-        // chekcs if a mounted partition is there
-        if !output.is_empty() {
-            return Ok(Some(output));
-        }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.file).poll_flush(cx)
     }
-    Ok(None)
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.file).poll_shutdown(cx)
+    }
 }
-impl std::io::Write for LinuxRawWriteHandle {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
+
+impl tokio::io::AsyncSeek for LinuxRawWriteHandle {
+    fn start_seek(mut self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
+        Pin::new(&mut self.file).start_seek(position)
     }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
+
+    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
+        Pin::new(&mut self.file).poll_complete(cx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn list_devie() {
-        let enumerator = LinuxDeviceEnumerator;
-        let devices = LinuxDeviceEnumerator::list_devices(&enumerator);
-        assert!(devices.is_ok());
-        let devices = devices.unwrap();
-        if let Some(checked) = devices.get(0) {
-            let corrected_path = {
-                let path = checked.path.components().nth(2).unwrap();
-                let mut new_path = PathBuf::from("/sys/block");
-                new_path.push(path);
-                new_path
-            };
-            assert!(LinuxDeviceEnumerator::name(corrected_path.clone()).is_ok());
-            assert!(LinuxDeviceEnumerator::path(corrected_path.clone()).is_some());
-            assert!(LinuxDeviceEnumerator::get_size_bytes(corrected_path.clone()).is_ok());
-            assert!(LinuxDeviceEnumerator::removable_status(corrected_path.clone()).is_ok());
-        }
+    #[tokio::test]
+    async fn test_get() {
+        let test = LinuxDBus::new().await.unwrap();
+        test.list_devices().await.unwrap();
     }
 }

@@ -4,11 +4,18 @@ use std::{
         Path,
         PathBuf,
     },
+    pin::Pin,
+    task::{
+        Context,
+        Poll,
+    },
 };
 
 use tokio::io::{
+    AsyncBufRead,
     AsyncRead,
     AsyncReadExt,
+    ReadBuf,
 };
 
 use crate::{
@@ -31,8 +38,6 @@ pub struct BlockDevice {
     pub size_bytes: u64,
     /// Check if removable
     pub is_removable: bool,
-    /// Check if its mounted
-    pub is_mounted: Option<Vec<MountedPartition>>,
     /// Sector size
     pub sector_size: usize,
 }
@@ -55,7 +60,7 @@ where
     R: AsyncRead + AsyncReadExt,
 {
     /// file pointer
-    reader: R,
+    reader: tokio::io::BufReader<R>,
     /// size end of the iso
     uncompressed_size: u64,
     /// hash
@@ -132,7 +137,6 @@ impl BlockDevice {
         name: String,
         size_bytes: u64,
         is_removable: bool,
-        is_mounted: Option<Vec<MountedPartition>>,
         sector_size: usize,
     ) -> Self {
         Self {
@@ -140,7 +144,6 @@ impl BlockDevice {
             name,
             size_bytes,
             is_removable,
-            is_mounted,
             sector_size,
         }
     }
@@ -167,12 +170,6 @@ impl BlockDevice {
     pub fn removable(&self) -> bool {
         self.is_removable
     }
-    /// gives mounted points back or None then none mounted
-    #[must_use]
-    #[inline]
-    pub fn mounted(&self) -> Option<Vec<MountedPartition>> {
-        self.is_mounted.clone()
-    }
     /// gives physical sector size back
     #[must_use]
     #[inline]
@@ -194,12 +191,55 @@ impl<R: AsyncRead + AsyncReadExt> AsyncImageSourceFile<R> {
     /// default constructor
     pub fn new(reader: R, uncompressed_size: u64, expected_hash: Option<[u8; 32]>) -> Self {
         Self {
-            reader,
+            reader: tokio::io::BufReader::new(reader),
             uncompressed_size,
             expected_hash,
         }
     }
 }
+impl<R: AsyncRead + Unpin> AsyncRead for AsyncImageSourceFile<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.reader).poll_read(cx, buf)
+    }
+}
+
+/// Delegate `AsyncBufRead` to the internal `BufReader`.
+impl<R: AsyncRead + Unpin> AsyncBufRead for AsyncImageSourceFile<R> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
+        // `get_mut` is safe here because we are not moving out of `self`.
+        Pin::new(&mut self.get_mut().reader).poll_fill_buf(cx)
+    }
+
+    fn consume(mut self: Pin<&mut Self>, amt: usize) {
+        Pin::new(&mut self.reader).consume(amt);
+    }
+}
+
+/// `ImageSource` for the async variant: provides metadata.
+///
+/// `read_chunk` is intentionally unused — `Flasher::flash` reads via
+/// `AsyncBufRead`; calling `read_chunk` on this type is a programming error.
+impl<R: AsyncRead + Unpin> ImageSource for AsyncImageSourceFile<R> {
+    fn uncompressed_size(&self) -> u64 {
+        self.uncompressed_size
+    }
+
+    fn read_chunk(&mut self, _buf: &mut [u8]) -> FlashResult<usize> {
+        Err(FlashError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "AsyncImageSourceFile uses AsyncRead; read_chunk must not be called",
+        )))
+    }
+
+    fn expected_hash(&self) -> Option<[u8; 32]> {
+        self.expected_hash
+    }
+}
+
 impl<R: Read> ImageSource for ImageSourceFile<R> {
     fn uncompressed_size(&self) -> u64 {
         self.uncompressed_size
