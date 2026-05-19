@@ -19,7 +19,10 @@ use zbus::zvariant::{
     OwnedObjectPath,
     OwnedValue,
 };
-use zvariant::OwnedFd;
+use zvariant::{
+    OwnedFd,
+    Value,
+};
 
 use crate::{
     data_types::BlockDevice,
@@ -309,9 +312,14 @@ impl DeviceWriter for LinuxDBus {
             .build()
             .await?;
 
-        // 3. Open device via D-Bus
+        let open_flags = libc::O_DIRECT | libc::O_SYNC | libc::O_CLOEXEC;
+
+        let mut options = HashMap::new();
+        let flags_owned = Value::from(open_flags).try_into_owned()?;
+
+        options.insert("flags".to_string(), flags_owned); // 3. Open device via D-Bus
         let fd: OwnedFd = block_proxy
-            .open_device("rw", &HashMap::new())
+            .open_device("rw", &options)
             .await
             .map_err(FlashError::Zbus)?;
         let std_fd: std::os::fd::OwnedFd = fd.into();

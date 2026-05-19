@@ -40,6 +40,9 @@ pub enum FlashError {
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
+    ZvariantError(#[from] zvariant::Error),
+
+    #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
 
     #[error(transparent)]

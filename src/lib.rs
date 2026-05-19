@@ -41,6 +41,6 @@ pub type OsFlasher = Flasher<Interface>;
 pub async fn flash() -> FlashResult<OsFlasher> {
     #[cfg(target_os = "linux")]
     let device = Interface::new().await?;
-    const SIZE_PAGE_READ_WRITTEN: usize = 8 * 1024 * 1024;
+    const SIZE_PAGE_READ_WRITTEN: usize = 512;
     Ok(Flasher::new(device, SIZE_PAGE_READ_WRITTEN))
 }
