@@ -1,12 +1,12 @@
 use std::io;
 
-use futures::Stream;
 use tokio::io::{
     AsyncBufReadExt,
     AsyncReadExt,
     AsyncSeekExt,
     AsyncWriteExt,
 };
+use tokio_stream::Stream;
 
 use crate::{
     data_types::{

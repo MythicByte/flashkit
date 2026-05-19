@@ -13,12 +13,9 @@
 pub mod data_types;
 /// Errors
 pub mod error;
-// #[cfg(target_os = "linux")]
-// /// Linux
-// pub mod linux;
 #[cfg(target_os = "linux")]
 /// Linux
-pub mod linux2;
+pub mod linux;
 #[cfg(target_os = "macos")]
 /// Macos
 pub mod macos;
@@ -29,28 +26,12 @@ pub mod traits;
 pub mod windows;
 
 #[cfg(target_os = "linux")]
-use linux2::LinuxDBus as Interface;
+use linux::LinuxDBus as Interface;
 
 use crate::{
     error::FlashResult,
     traits::Flasher,
 };
-
-// #[cfg(target_os = "windows")]
-// use windows::{
-//     WindowsDeviceEjector as SysEjector,
-//     WindowsDeviceEnumerator as SysEnumerator,
-//     WindowsDeviceUnmounter as SysUnmounter,
-//     WindowsDeviceWriter as SysWriter,
-// };
-
-// #[cfg(target_os = "macos")]
-// use macos::{
-//     MacosDeviceEjector as SysEjector,
-//     MacosDeviceEnumerator as SysEnumerator,
-//     MacosDeviceUnmounter as SysUnmounter,
-//     MacosDeviceWriter as SysWriter,
-// };
 
 /// The platform-native Flasher type
 pub type OsFlasher = Flasher<Interface>;
