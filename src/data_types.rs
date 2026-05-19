@@ -31,8 +31,6 @@ pub struct BlockDevice {
     pub size_bytes: u64,
     /// Check if removable
     pub is_removable: bool,
-    /// Check if its mounted
-    pub is_mounted: Option<Vec<MountedPartition>>,
     /// Sector size
     pub sector_size: usize,
 }
@@ -132,7 +130,6 @@ impl BlockDevice {
         name: String,
         size_bytes: u64,
         is_removable: bool,
-        is_mounted: Option<Vec<MountedPartition>>,
         sector_size: usize,
     ) -> Self {
         Self {
@@ -140,7 +137,6 @@ impl BlockDevice {
             name,
             size_bytes,
             is_removable,
-            is_mounted,
             sector_size,
         }
     }
@@ -166,12 +162,6 @@ impl BlockDevice {
     #[inline]
     pub fn removable(&self) -> bool {
         self.is_removable
-    }
-    /// gives mounted points back or None then none mounted
-    #[must_use]
-    #[inline]
-    pub fn mounted(&self) -> Option<Vec<MountedPartition>> {
-        self.is_mounted.clone()
     }
     /// gives physical sector size back
     #[must_use]

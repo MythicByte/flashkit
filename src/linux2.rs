@@ -103,6 +103,7 @@ trait UDisks2Filesystem {
 }
 
 /// Linux a connection to the d bus system bus
+#[derive(Debug, Clone)]
 pub(crate) struct LinuxDBus {
     connection: zbus::Connection,
 }

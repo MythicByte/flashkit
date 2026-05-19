@@ -12,9 +12,12 @@
 pub mod data_types;
 /// Errors
 pub mod error;
+// #[cfg(target_os = "linux")]
+// /// Linux
+// pub mod linux;
 #[cfg(target_os = "linux")]
 /// Linux
-pub mod linux;
+pub mod linux2;
 #[cfg(target_os = "macos")]
 /// Macos
 pub mod macos;
@@ -25,14 +28,17 @@ pub mod traits;
 pub mod windows;
 
 #[cfg(target_os = "linux")]
-use linux::{
-    LinuxDeviceEjector as SysEjector,
-    LinuxDeviceEnumerator as SysEnumerator,
-    LinuxDeviceUnmounter as SysUnmounter,
-    LinuxDeviceWriter as SysWriter,
+use linux2::{
+    LinuxDBus as SysEjector,
+    LinuxDBus as SysEnumerator,
+    LinuxDBus as SysUnmounter,
+    LinuxDBus as SysWriter,
 };
 
-use crate::traits::Flasher;
+use crate::{
+    error::FlashResult,
+    traits::Flasher,
+};
 
 // #[cfg(target_os = "windows")]
 // use windows::{
@@ -55,12 +61,13 @@ pub type OsFlasher = Flasher<SysEnumerator, SysUnmounter, SysWriter, SysEjector>
 
 /// Automatically creates a Flasher configured for the current operating system.
 #[must_use]
-pub fn flash() -> OsFlasher {
-    Flasher::new(
-        SysEnumerator,
-        SysUnmounter,
-        SysWriter,
-        SysEjector,
+pub async fn flash() -> FlashResult<OsFlasher> {
+    let device = SysEnumerator::new().await?;
+    Ok(Flasher::new(
+        device.clone(),
+        device.clone(),
+        device.clone(),
+        device.clone(),
         1024 * 1024, // 1MB default chunk size
-    )
+    ))
 }
