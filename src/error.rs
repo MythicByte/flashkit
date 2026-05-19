@@ -45,8 +45,14 @@ pub enum FlashError {
     #[error(transparent)]
     TryInt(#[from] std::num::TryFromIntError),
 
+    #[error(transparent)]
+    Zbus(#[from] zbus::Error),
+
     #[error("Sending with channel failed")]
     SendChannelError,
+
+    #[error(transparent)]
+    Fdo(#[from] zbus::fdo::Error),
 
     #[error("A array was accesed out of bounds")]
     OutOfBoundsArray,
