@@ -115,40 +115,28 @@ pub trait ImageSource {
 }
 /// Generic Flasher
 #[derive(Debug, Clone)]
-pub struct Flasher<E, U, W, J>
+pub struct Flasher<T>
 where
-    E: DeviceEnumerator,
-    U: DeviceUnmounter,
-    W: DeviceWriter,
-    J: DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
 {
-    enumerator: E,
-    unmounter: U,
-    writer: W,
-    ejector: J,
+    interface: T,
     chunk_size: usize,
 }
 
-impl<E, U, W, J> Flasher<E, U, W, J>
+impl<T> Flasher<T>
 where
-    E: DeviceEnumerator,
-    U: DeviceUnmounter,
-    W: DeviceWriter,
-    J: DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
 {
     /// basic constructor
-    pub fn new(enumerator: E, unmounter: U, writer: W, ejector: J, chunk_size: usize) -> Self {
+    pub fn new(interface: T, chunk_size: usize) -> Self {
         Self {
-            enumerator,
-            unmounter,
-            writer,
-            ejector,
+            interface,
             chunk_size,
         }
     }
     /// Get all storage decies with intoformation
     pub async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
-        self.enumerator.list_devices().await
+        self.interface.list_devices().await
     }
     // /// flashes file to storage
     // pub fn block_flash(
@@ -298,13 +286,13 @@ where
 
     async fn verify(
         &self,
-        handle: &mut W::Handle,
+        handle: &mut T::Handle,
         source: impl ImageSource + tokio::io::AsyncRead + tokio::io::AsyncBufRead + Unpin,
         written_bytes: u64,
         send_progress: tokio::sync::mpsc::Sender<FlashProgress>,
     ) -> FlashResult<tokio::sync::mpsc::Sender<FlashProgress>>
     where
-        W::Handle: tokio::io::AsyncRead + Unpin,
+        T::Handle: tokio::io::AsyncRead + Unpin,
     {
         use sha2::{
             Digest,
@@ -361,18 +349,15 @@ where
         on_progress: tokio::sync::mpsc::Sender<FlashProgress>,
     ) -> FlashResult<()>
     where
-        <W as DeviceWriter>::Handle: tokio::io::AsyncWrite,
-        <W as DeviceWriter>::Handle: Unpin,
-        <W as DeviceWriter>::Handle: tokio::io::AsyncRead,
-        <W as DeviceWriter>::Handle: tokio::io::AsyncSeek,
+        T::Handle: tokio::io::AsyncWrite + Unpin + tokio::io::AsyncRead + tokio::io::AsyncSeek,
     {
         on_progress
             .send(FlashProgress::transition(FlashPhase::Unmounting))
             .await
             .map_err(|_| FlashError::SendChannelError)?;
-        self.unmounter.unmount(device).await?;
+        self.interface.unmount(device).await?;
 
-        let handle = self.writer.open_for_writing(device).await?;
+        let handle = self.interface.open_for_writing(device).await?;
         let sector_size = handle.sector_size();
         let total_bytes = source.uncompressed_size();
         let mut reader = tokio::io::BufReader::with_capacity(sector_size, source);
@@ -446,7 +431,7 @@ where
             .verify(&mut handle, source, offset, on_progress)
             .await?;
 
-        self.ejector.eject(device).await?;
+        self.interface.eject(device).await?;
 
         sender
             .send(FlashProgress::transition(FlashPhase::Done))

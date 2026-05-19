@@ -1,3 +1,4 @@
+#![allow(async_fn_in_trait)]
 //! A libary for flashing data to a storage device / block device
 //!
 //! **Cross Platform Support**
@@ -28,12 +29,7 @@ pub mod traits;
 pub mod windows;
 
 #[cfg(target_os = "linux")]
-use linux2::{
-    LinuxDBus as SysEjector,
-    LinuxDBus as SysEnumerator,
-    LinuxDBus as SysUnmounter,
-    LinuxDBus as SysWriter,
-};
+use linux2::LinuxDBus as Interface;
 
 use crate::{
     error::FlashResult,
@@ -57,17 +53,14 @@ use crate::{
 // };
 
 /// The platform-native Flasher type
-pub type OsFlasher = Flasher<SysEnumerator, SysUnmounter, SysWriter, SysEjector>;
+pub type OsFlasher = Flasher<Interface>;
 
 /// Automatically creates a Flasher configured for the current operating system.
 #[must_use]
 pub async fn flash() -> FlashResult<OsFlasher> {
-    let device = SysEnumerator::new().await?;
+    let device = Interface::new().await?;
     Ok(Flasher::new(
-        device.clone(),
-        device.clone(),
-        device.clone(),
-        device.clone(),
+        device,
         1024 * 1024, // 1MB default chunk size
     ))
 }
