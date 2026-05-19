@@ -39,6 +39,8 @@ pub type OsFlasher = Flasher<Interface>;
 /// Automatically creates a Flasher configured for the current operating system.
 #[must_use]
 pub async fn flash() -> FlashResult<OsFlasher> {
+    #[cfg(target_os = "linux")]
     let device = Interface::new().await?;
-    Ok(Flasher::new(device, 8 * 1024 * 1024))
+    const SIZE_PAGE_READ_WRITTEN: usize = 8 * 1024 * 1024;
+    Ok(Flasher::new(device, SIZE_PAGE_READ_WRITTEN))
 }

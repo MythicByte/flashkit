@@ -7,6 +7,7 @@ use tokio::io::{
     AsyncWriteExt,
 };
 use tokio_stream::Stream;
+use tracing::info;
 
 use crate::{
     data_types::{
@@ -207,8 +208,17 @@ where
         let handle = self.interface.open_for_writing(device).await?;
         let sector_size = handle.sector_size();
         let total_bytes = source.uncompressed_size();
-        let mut reader = tokio::io::BufReader::with_capacity(sector_size, source);
-        let mut writter = tokio::io::BufWriter::with_capacity(handle.sector_size(), handle);
+        #[cfg(target_os = "linux")]
+        let (mut reader, mut writter) = (
+            tokio::io::BufReader::with_capacity(self.chunk_size, source),
+            tokio::io::BufWriter::with_capacity(self.chunk_size, handle),
+        );
+
+        #[cfg(not(target_os = "linux"))]
+        let (mut reader, mut writter) = (
+            tokio::io::BufReader::with_capacity(sector_size, source),
+            tokio::io::BufWriter::with_capacity(sector_size, handle),
+        );
         let mut offset: u64 = 0;
 
         on_progress
@@ -244,7 +254,7 @@ where
             }
 
             let elapsed = timer.elapsed().as_secs_f64();
-            if elapsed >= 0.50 {
+            if elapsed >= 1.00 {
                 on_progress
                     .send(FlashProgress {
                         bytes_written: offset,
@@ -264,7 +274,7 @@ where
         let mut handle = writter.into_inner();
         handle.flush_to_disk().await?;
         handle.seek(io::SeekFrom::Start(0)).await?;
-
+        info!("Verify now");
         on_progress
             .send(FlashProgress::transition(FlashPhase::Verifying))
             .map_err(|_| FlashError::SendChannelError)?;
