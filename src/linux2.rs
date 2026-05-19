@@ -6,12 +6,18 @@ use std::{
         unix::io::FromRawFd,
     },
     path::Path,
+    pin::Pin,
+    task::{
+        Context,
+        Poll,
+    },
 };
 
 use tokio::io::{
     AsyncReadExt,
     AsyncSeekExt,
     AsyncWriteExt,
+    ReadBuf,
 };
 use zbus::zvariant::{
     OwnedObjectPath,
@@ -35,7 +41,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) struct LinuxRawWriteHandle {
+pub struct LinuxRawWriteHandle {
     file: tokio::fs::File,
     sector_size: usize,
     size_bytes: u64,
@@ -104,7 +110,7 @@ trait UDisks2Filesystem {
 
 /// Linux a connection to the d bus system bus
 #[derive(Debug, Clone)]
-pub(crate) struct LinuxDBus {
+pub struct LinuxDBus {
     connection: zbus::Connection,
 }
 
@@ -311,9 +317,8 @@ impl DeviceWriter for LinuxDBus {
             .open_device("rw", &HashMap::new())
             .await
             .map_err(FlashError::Zbus)?;
-
-        //SAFETY: The file desriptor is given and only transformed
-        let file = unsafe { tokio::fs::File::from_raw_fd(fd.as_raw_fd()) };
+        let std_fd: std::os::fd::OwnedFd = fd.into();
+        let file = tokio::fs::File::from(std::fs::File::from(std_fd));
 
         Ok(LinuxRawWriteHandle {
             file,
@@ -322,6 +327,44 @@ impl DeviceWriter for LinuxDBus {
         })
     }
 }
+impl tokio::io::AsyncRead for LinuxRawWriteHandle {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.file).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for LinuxRawWriteHandle {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.file).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.file).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.file).poll_shutdown(cx)
+    }
+}
+
+impl tokio::io::AsyncSeek for LinuxRawWriteHandle {
+    fn start_seek(mut self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
+        Pin::new(&mut self.file).start_seek(position)
+    }
+
+    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
+        Pin::new(&mut self.file).poll_complete(cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
