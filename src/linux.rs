@@ -218,7 +218,12 @@ impl DeviceUnmounter for LinuxDBus {
                 let mps = fs_proxy.mount_points().await.unwrap_or_default();
                 if !mps.is_empty() {
                     // Mounted, so unmount
-                    fs_proxy.unmount(&HashMap::new()).await.map_err(|_| {
+                    let mut unmount_options = HashMap::new();
+
+                    // UDisks2 expects boolean values wrapped as an OwnedValue variant
+                    let force_val = zbus::zvariant::Value::from(true).try_into_owned()?;
+                    unmount_options.insert("force".to_string(), force_val);
+                    fs_proxy.unmount(&unmount_options).await.map_err(|_| {
                         FlashError::DeviceBusy {
                             path: child_dev_str.trim_end_matches("\0").into(),
                         }

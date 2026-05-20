@@ -1,7 +1,8 @@
-use std::io;
+use std::io::{
+    self,
+};
 
 use tokio::io::{
-    AsyncBufReadExt,
     AsyncReadExt,
     AsyncSeekExt,
     AsyncWriteExt,
@@ -11,6 +12,7 @@ use tracing::info;
 
 use crate::{
     data_types::{
+        AsyncImageSourceFile,
         BlockDevice,
         DeviceEvent,
         FlashPhase,
@@ -21,6 +23,9 @@ use crate::{
         FlashResult,
     },
 };
+#[derive(Clone)]
+#[repr(align(512))]
+pub(crate) struct AlignedBuffer(pub [u8; 4096]);
 
 /// A raw write handle to a block device.
 /// Separated from DeviceWriter so the handle can carry platform state
@@ -93,21 +98,7 @@ pub trait DeviceEjector {
     /// eject device
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()>;
 }
-/// Decompress / stream an image file into a byte source.
-/// Lets the write loop not care about image format.
-pub trait ImageSource {
-    /// Uncompressed size, if known ahead of time.
-    fn uncompressed_size(&self) -> u64;
 
-    /// Read the next chunk of uncompressed data.
-    /// Returns 0 on EOF.
-    fn read_chunk(&mut self, buf: &mut [u8]) -> FlashResult<usize>;
-
-    /// SHA256 of the *uncompressed* content, if embedded in the image format.
-    fn expected_hash(&self) -> Option<[u8; 32]> {
-        None
-    }
-}
 /// Generic Flasher
 #[derive(Debug, Clone)]
 pub struct Flasher<T>
@@ -137,7 +128,7 @@ where
     async fn verify(
         &self,
         handle: &mut T::Handle,
-        source: impl ImageSource + tokio::io::AsyncRead + tokio::io::AsyncBufRead + Unpin,
+        source: AsyncImageSourceFile,
         written_bytes: u64,
         send_progress: tokio::sync::watch::Sender<FlashProgress>,
     ) -> FlashResult<tokio::sync::watch::Sender<FlashProgress>>
@@ -149,15 +140,22 @@ where
             Sha256,
         };
         let mut timer = std::time::Instant::now();
-        let mut reader = tokio::io::BufReader::with_capacity(self.chunk_size, handle);
-        reader.fill_buf().await?;
+        let mut buffer = AlignedBuffer([0u8; 4096]);
         let mut hasher = Sha256::new();
         let mut offset = 0u64;
         let mut tmp_counter: u64 = 0;
-        while !reader.buffer().is_empty() {
-            hasher.update(reader.buffer());
-            offset += u64::try_from(reader.buffer().len())?;
-            tmp_counter += reader.buffer().len() as u64;
+        loop {
+            if offset >= written_bytes {
+                break;
+            }
+            let max_to_read = std::cmp::min(buffer.0.len() as u64, written_bytes - offset) as usize;
+            let read_back = handle.read(&mut buffer.0[..max_to_read]).await?;
+            if read_back == 0 {
+                break;
+            }
+            hasher.update(&buffer.0[..read_back]);
+            offset += read_back as u64;
+            tmp_counter += read_back as u64;
             let elapsed = timer.elapsed().as_secs_f64();
             if elapsed >= 1.00 {
                 send_progress
@@ -171,8 +169,6 @@ where
                 tmp_counter = 0;
                 timer = std::time::Instant::now();
             }
-            reader.consume(reader.buffer().len());
-            reader.fill_buf().await?;
         }
 
         let actual = hasher.finalize();
@@ -193,7 +189,7 @@ where
     /// flash async versions
     pub async fn flash(
         &self,
-        source: impl ImageSource + tokio::io::AsyncRead + tokio::io::AsyncBufRead + Unpin,
+        mut source_of_image: AsyncImageSourceFile,
         device: &BlockDevice,
         on_progress: tokio::sync::watch::Sender<FlashProgress>,
     ) -> FlashResult<()>
@@ -205,20 +201,8 @@ where
             .map_err(|_| FlashError::SendChannelError)?;
         self.interface.unmount(device).await?;
 
-        let handle = self.interface.open_for_writing(device).await?;
-        let sector_size = handle.sector_size();
-        let total_bytes = source.uncompressed_size();
-        #[cfg(target_os = "linux")]
-        let (mut reader, mut writter) = (
-            tokio::io::BufReader::with_capacity(self.chunk_size, source),
-            tokio::io::BufWriter::with_capacity(self.chunk_size, handle),
-        );
-
-        #[cfg(not(target_os = "linux"))]
-        let (mut reader, mut writter) = (
-            tokio::io::BufReader::with_capacity(sector_size, source),
-            tokio::io::BufWriter::with_capacity(sector_size, handle),
-        );
+        let mut handle_target_write_to = self.interface.open_for_writing(device).await?;
+        let total_bytes = source_of_image.uncompressed_size();
         let mut offset: u64 = 0;
 
         on_progress
@@ -232,28 +216,31 @@ where
 
         let mut timer = std::time::Instant::now();
         let mut bytes_since_last_report: u64 = 0;
-        let mut status_read_back: usize = usize::MAX;
-        let mut buffer = vec![0u8; sector_size];
-        while status_read_back != 0 {
-            match reader.read(&mut buffer).await {
-                Ok(0) => break,
-                Ok(number_read) => {
-                    let buffer_write = match buffer.get(..number_read) {
-                        Some(x) => x,
-                        None => return Err(FlashError::OutOfBoundsArray),
-                    };
-                    status_read_back = number_read;
-                    writter.write_all(buffer_write).await?;
-                    offset += number_read as u64;
-                    bytes_since_last_report += number_read as u64;
+        let mut buffer = AlignedBuffer([0u8; 4096]);
+        loop {
+            let read_back = source_of_image.file.read(&mut buffer.0).await?;
+            info!("Read: {}", read_back);
+            if read_back > buffer.0.len() {
+                if read_back == 0 {
+                    break;
                 }
-                Err(error) => {
-                    tracing::error!("Read error: {}", error);
-                    return Err(FlashError::Io(error));
+                for i in &mut buffer.0[read_back..] {
+                    *i = 0;
                 }
+                handle_target_write_to
+                    .write_all(buffer.0.as_slice())
+                    .await?;
+                offset += read_back as u64;
+                break;
+            } else {
+                handle_target_write_to
+                    .write_all(buffer.0.as_slice())
+                    .await?;
+                offset += read_back as u64
             }
 
             let elapsed = timer.elapsed().as_secs_f64();
+            bytes_since_last_report += read_back as u64;
             if elapsed >= 1.00 {
                 on_progress
                     .send(FlashProgress {
@@ -267,21 +254,24 @@ where
                 timer = std::time::Instant::now();
             }
         }
+        info!("Flash");
         on_progress
             .send(FlashProgress::transition(FlashPhase::Flushing))
             .map_err(|_| FlashError::SendChannelError)?;
-        writter.flush().await?;
-        let mut handle = writter.into_inner();
-        handle.flush_to_disk().await?;
-        handle.seek(io::SeekFrom::Start(0)).await?;
+        handle_target_write_to.flush_to_disk().await?;
+        handle_target_write_to.seek(io::SeekFrom::Start(0)).await?;
         info!("Verify now");
         on_progress
             .send(FlashProgress::transition(FlashPhase::Verifying))
             .map_err(|_| FlashError::SendChannelError)?;
 
-        let source = reader.into_inner();
         let sender = self
-            .verify(&mut handle, source, offset, on_progress)
+            .verify(
+                &mut handle_target_write_to,
+                source_of_image,
+                offset,
+                on_progress,
+            )
             .await?;
 
         self.interface.eject(device).await?;
