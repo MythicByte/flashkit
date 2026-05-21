@@ -23,7 +23,7 @@ pub mod linux;
 pub mod macos;
 /// Generic Traits abstraction
 pub mod traits;
-#[cfg(target_os = "windows")]
+// #[cfg(target_os = "windows")]
 /// Windows
 pub mod windows;
 
