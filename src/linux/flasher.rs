@@ -174,7 +174,7 @@ where
             if offset >= written_bytes {
                 break;
             }
-            let read_back = handle.read(&mut buffer_slice).await?;
+            let read_back = handle.read_at(offset, &mut buffer_slice).await?;
             if read_back == 0 {
                 break;
             }
