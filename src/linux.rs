@@ -1,2 +1,2 @@
-pub(crate) mod flasher;
-pub(crate) mod linux;
+pub mod flasher;
+pub mod linux;

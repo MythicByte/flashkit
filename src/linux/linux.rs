@@ -322,6 +322,7 @@ impl DeviceWriter for LinuxDBus {
             .build()
             .await?;
 
+        // the flags O_DIRECT  O_SYNC  O_CLOEXEC must be there for raw writing and that no kernel caching is used
         let open_flags = libc::O_DIRECT | libc::O_SYNC | libc::O_CLOEXEC;
 
         let mut options = HashMap::new();

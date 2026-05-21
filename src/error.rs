@@ -54,6 +54,10 @@ pub enum FlashError {
     #[error("Sending with channel failed")]
     SendChannelError,
 
+    #[error("Filesystem has send a error")]
+    FilesystemError(String),
+    #[error("Allocation Layout error")]
+    Layour(#[from] std::alloc::LayoutError),
     #[error(transparent)]
     Fdo(#[from] zbus::fdo::Error),
 
