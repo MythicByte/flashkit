@@ -290,23 +290,20 @@ impl RawWriteHandle for LinuxRawWriteHandle {
         Ok(())
     }
 
-    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<()> {
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
         let fd = self.file.as_raw_fd();
         let ptr = buf.as_mut_ptr() as usize;
         let len = buf.len();
 
-        tokio::task::spawn_blocking(move || {
+        let bytes_read = tokio::task::spawn_blocking(move || {
             let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-
-            // Perform an exact positional read using the OS file descriptor
-            // Safety: reconstruct a BorrowedFd with a local lifetime inside the closure
             let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
             rustix::io::pread(borrowed_fd, slice, offset)
         })
         .await
         .map_err(|_| FlashError::SyncError)?
         .map_err(std::io::Error::from)?;
-        Ok(())
+        Ok(bytes_read)
     }
 
     async fn flush_to_disk(&mut self) -> FlashResult<()> {
