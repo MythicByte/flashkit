@@ -61,6 +61,7 @@ pub enum FlashPhase {
     Writing,
     Flushing,
     Verifying,
+    VerifyingHashDoesNotMatch,
     Done,
 }
 

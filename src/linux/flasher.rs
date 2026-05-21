@@ -203,12 +203,16 @@ where
         if let Some(expected) = source.expected_hash()
             && actual.as_slice() != expected
         {
-            let failing_hash_hex = hex::encode(actual);
-            let correct_hash_hex = hex::encode(expected);
-            return Err(FlashError::VerificationFailed {
-                failed_hash_hex: failing_hash_hex,
-                expected_hex: correct_hash_hex,
-            });
+            // let failing_hash_hex = hex::encode(actual);
+            // let correct_hash_hex = hex::encode(expected);
+            send_progress
+                .send(FlashProgress {
+                    bytes_written: 0,
+                    total_bytes: 0,
+                    bytes_per_sec: 0.0,
+                    phase: FlashPhase::VerifyingHashDoesNotMatch,
+                })
+                .map_err(|_| FlashError::SendChannelError)?;
         }
 
         Ok(send_progress)
