@@ -40,16 +40,10 @@ pub enum FlashError {
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
-    ZvariantError(#[from] zvariant::Error),
-
-    #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
 
     #[error(transparent)]
     TryInt(#[from] std::num::TryFromIntError),
-
-    #[error(transparent)]
-    Zbus(#[from] zbus::Error),
 
     #[error("Sending with channel failed")]
     SendChannelError,
@@ -58,9 +52,18 @@ pub enum FlashError {
     FilesystemError(String),
     #[error("Allocation Layout error")]
     Layour(#[from] std::alloc::LayoutError),
-    #[error(transparent)]
-    Fdo(#[from] zbus::fdo::Error),
 
     #[error("A array was accesed out of bounds")]
     OutOfBoundsArray,
+
+    // Linux Errors only with D-bus
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    ZvariantError(#[from] zvariant::Error),
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Zbus(#[from] zbus::Error),
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Fdo(#[from] zbus::fdo::Error),
 }

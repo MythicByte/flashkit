@@ -10,6 +10,7 @@
 //!
 
 /// A aligned vec
+#[cfg(unix)]
 pub mod aligned;
 /// Libary Data types
 pub mod data_types;
@@ -23,9 +24,11 @@ pub mod linux;
 pub mod macos;
 /// Generic Traits abstraction
 pub mod traits;
-// #[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
 /// Windows
 pub mod windows;
+#[cfg(target_os = "windows")]
+use crate::windows::windows::WindowsRawWriteHandle as Interface;
 
 #[cfg(target_os = "linux")]
 use crate::linux::linux::LinuxDBus as Interface;
@@ -39,9 +42,16 @@ use crate::{
 pub type OsFlasher = Flasher<Interface>;
 
 /// Automatically creates a Flasher configured for the current operating system.
+#[cfg(target_os = "linux")]
 #[must_use]
 pub async fn flash() -> FlashResult<OsFlasher> {
-    #[cfg(target_os = "linux")]
+    let device = Interface::new().await?;
+    Ok(Flasher::new(device))
+}
+/// Automatically creates a Flasher configured for the current operating system.
+#[cfg(target_os = "windows")]
+#[must_use]
+pub async fn flash() -> FlashResult<OsFlasher> {
     let device = Interface::new().await?;
     Ok(Flasher::new(device))
 }
