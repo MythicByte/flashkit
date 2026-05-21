@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    io::SeekFrom,
+    io::{
+        Seek,
+        SeekFrom,
+    },
     os::fd::{
         AsRawFd,
         BorrowedFd,
@@ -43,7 +46,7 @@ use crate::{
 #[allow(missing_docs)]
 #[derive(Debug)]
 pub struct LinuxRawWriteHandle {
-    file: tokio::fs::File,
+    file: std::fs::File,
     sector_size: usize,
     size_bytes: u64,
 }
@@ -307,7 +310,7 @@ impl RawWriteHandle for LinuxRawWriteHandle {
     }
 
     async fn flush_to_disk(&mut self) -> FlashResult<()> {
-        self.file.sync_all().await?;
+        self.file.sync_all()?;
         Ok(())
     }
 
@@ -320,7 +323,7 @@ impl RawWriteHandle for LinuxRawWriteHandle {
     }
 
     async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        self.file.seek(seek).await.map_err(FlashError::Io)?;
+        self.file.seek(seek).map_err(FlashError::Io)?;
         Ok(())
     }
 }
@@ -353,50 +356,13 @@ impl DeviceWriter for LinuxDBus {
             .await
             .map_err(FlashError::Zbus)?;
         let std_fd: std::os::fd::OwnedFd = fd.into();
-        let file = tokio::fs::File::from(std::fs::File::from(std_fd));
+        let file = std::fs::File::from(std_fd);
 
         Ok(LinuxRawWriteHandle {
             file,
             sector_size: device.sector_size,
             size_bytes: device.size_bytes,
         })
-    }
-}
-impl tokio::io::AsyncRead for LinuxRawWriteHandle {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.file).poll_read(cx, buf)
-    }
-}
-
-impl tokio::io::AsyncWrite for LinuxRawWriteHandle {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.file).poll_write(cx, buf)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.file).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.file).poll_shutdown(cx)
-    }
-}
-
-impl tokio::io::AsyncSeek for LinuxRawWriteHandle {
-    fn start_seek(mut self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
-        Pin::new(&mut self.file).start_seek(position)
-    }
-
-    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
-        Pin::new(&mut self.file).poll_complete(cx)
     }
 }
 

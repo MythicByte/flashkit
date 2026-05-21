@@ -59,11 +59,7 @@ pub trait RawWriteHandle {
 /// sector-aligned writes, and the handle must stay open post-lock.
 pub trait DeviceWriter {
     /// wrte handle
-    type Handle: RawWriteHandle
-        + tokio::io::AsyncRead
-        + tokio::io::AsyncWrite
-        + tokio::io::AsyncSeek
-        + Unpin;
+    type Handle: RawWriteHandle;
 
     /// open file with lock
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle>;
