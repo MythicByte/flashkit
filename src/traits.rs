@@ -11,6 +11,7 @@ use tokio_stream::Stream;
 use tracing::info;
 
 use crate::{
+    aligned::PageAlignedBuffer,
     data_types::{
         AsyncImageSourceFile,
         BlockDevice,
@@ -23,9 +24,6 @@ use crate::{
         FlashResult,
     },
 };
-#[derive(Clone)]
-#[repr(align(512))]
-pub(crate) struct AlignedBuffer(pub [u8; 4096]);
 
 /// A raw write handle to a block device.
 /// Separated from DeviceWriter so the handle can carry platform state
@@ -140,20 +138,23 @@ where
             Sha256,
         };
         let mut timer = std::time::Instant::now();
-        let mut buffer = AlignedBuffer([0u8; 4096]);
         let mut hasher = Sha256::new();
         let mut offset = 0u64;
         let mut tmp_counter: u64 = 0;
+        let buffer = PageAlignedBuffer::new(1024).expect("error");
+        let buffer_slice =
+            unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer.size()) };
         loop {
             if offset >= written_bytes {
                 break;
             }
-            let max_to_read = std::cmp::min(buffer.0.len() as u64, written_bytes - offset) as usize;
-            let read_back = handle.read(&mut buffer.0[..max_to_read]).await?;
+            let max_to_read = std::cmp::min(buffer.size() as u64, written_bytes - offset) as usize;
+            let read_back = handle.read(&mut buffer_slice[..max_to_read]).await?;
+            info!("Read: {}", read_back);
             if read_back == 0 {
                 break;
             }
-            hasher.update(&buffer.0[..read_back]);
+            hasher.update(&buffer_slice[..read_back]);
             offset += read_back as u64;
             tmp_counter += read_back as u64;
             let elapsed = timer.elapsed().as_secs_f64();
@@ -202,6 +203,7 @@ where
         self.interface.unmount(device).await?;
 
         let mut handle_target_write_to = self.interface.open_for_writing(device).await?;
+        info!("{}", handle_target_write_to.sector_size());
         let total_bytes = source_of_image.uncompressed_size();
         let mut offset: u64 = 0;
 
@@ -216,26 +218,30 @@ where
 
         let mut timer = std::time::Instant::now();
         let mut bytes_since_last_report: u64 = 0;
-        let mut buffer = AlignedBuffer([0u8; 4096]);
+        let buffer = PageAlignedBuffer::new(1024).expect("error");
+        let mut buffer_slice =
+            unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer.size()) };
         loop {
-            let read_back = source_of_image.file.read(&mut buffer.0).await?;
+            let read_back = source_of_image.file.read(&mut buffer_slice).await?;
+
             info!("Read: {}", read_back);
-            if read_back > buffer.0.len() {
+            if read_back < buffer.size() {
                 if read_back == 0 {
                     break;
                 }
-                for i in &mut buffer.0[read_back..] {
-                    *i = 0;
+                if let Some(slice) = buffer_slice.get_mut(read_back..) {
+                    for i in slice {
+                        *i = 0;
+                    }
                 }
-                handle_target_write_to
-                    .write_all(buffer.0.as_slice())
-                    .await?;
+                info!("Read: 1");
+                handle_target_write_to.write_all(&buffer_slice).await?;
                 offset += read_back as u64;
                 break;
             } else {
-                handle_target_write_to
-                    .write_all(buffer.0.as_slice())
-                    .await?;
+                info!("Read: 2");
+                handle_target_write_to.write_all(&buffer_slice).await?;
+                info!("Read: after writing");
                 offset += read_back as u64
             }
 

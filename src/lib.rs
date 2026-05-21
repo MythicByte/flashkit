@@ -9,6 +9,8 @@
 //! - [ ] Macos
 //!
 
+/// A aligned vec
+pub mod aligned;
 /// Libary Data types
 pub mod data_types;
 /// Errors
