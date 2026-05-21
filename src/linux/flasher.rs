@@ -44,7 +44,6 @@ where
         self.interface.unmount(device).await?;
 
         let mut handle_target_write_to = self.interface.open_for_writing(device).await?;
-        info!("{}", handle_target_write_to.sector_size());
         let total_bytes = source_of_image.uncompressed_size();
         let mut offset: u64 = 0;
 
@@ -112,7 +111,6 @@ where
                 timer = std::time::Instant::now();
             }
         }
-        info!("Flash");
         on_progress
             .send(FlashProgress::transition(FlashPhase::Flushing))
             .map_err(|_| FlashError::SendChannelError)?;
@@ -120,11 +118,10 @@ where
         handle_target_write_to
             .seek(std::io::SeekFrom::Start(0))
             .await?;
-        info!("Verify now");
         on_progress
             .send(FlashProgress::transition(FlashPhase::Verifying))
             .map_err(|_| FlashError::SendChannelError)?;
-
+        info!("Verifyer started");
         let sender = self
             .verify(
                 &mut handle_target_write_to,
@@ -171,18 +168,19 @@ where
 
         let buffer = PageAlignedBuffer::new(buffer_size / page_size).expect("error");
         // SAFETY: Buffer is page-aligned and size is multiple of page size
-        let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer_size) };
+        let mut buffer_slice =
+            unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer_size) };
         loop {
             if offset >= written_bytes {
                 break;
             }
-            let max_to_read = std::cmp::min(buffer.size() as u64, written_bytes - offset) as usize;
-            let read_back = handle.read(&mut buffer_slice[..max_to_read]).await?;
-            info!("Read: {}", read_back);
+            let read_back = handle.read(&mut buffer_slice).await?;
             if read_back == 0 {
                 break;
             }
-            hasher.update(&buffer_slice[..read_back]);
+            let valid_bytes = std::cmp::min(read_back, (written_bytes - offset) as usize);
+
+            hasher.update(&buffer_slice[..valid_bytes]);
             offset += read_back as u64;
             tmp_counter += read_back as u64;
             let elapsed = timer.elapsed().as_secs_f64();
