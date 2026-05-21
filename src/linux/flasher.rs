@@ -76,7 +76,6 @@ where
         loop {
             let read_back = source_of_image.file.read(&mut buffer_slice).await?;
 
-            info!("Read: {}", read_back);
             if read_back < buffer.size() {
                 if read_back == 0 {
                     break;
@@ -86,18 +85,15 @@ where
                         *i = 0;
                     }
                 }
-                info!("Read: 1");
                 handle_target_write_to
                     .write_at(offset, &buffer_slice)
                     .await?;
                 offset += read_back as u64;
                 break;
             } else {
-                info!("Read: 2");
                 handle_target_write_to
                     .write_at(offset, &buffer_slice)
                     .await?;
-                info!("Read: after writing");
                 offset += read_back as u64
             }
 

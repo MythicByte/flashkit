@@ -1,6 +1,10 @@
 use std::{
     collections::HashMap,
     io::SeekFrom,
+    os::fd::{
+        AsRawFd,
+        BorrowedFd,
+    },
     path::Path,
     pin::Pin,
     task::{
@@ -10,9 +14,7 @@ use std::{
 };
 
 use tokio::io::{
-    AsyncReadExt,
     AsyncSeekExt,
-    AsyncWriteExt,
     ReadBuf,
 };
 use zbus::zvariant::{
@@ -269,21 +271,41 @@ impl DeviceEjector for LinuxDBus {
 }
 impl RawWriteHandle for LinuxRawWriteHandle {
     async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .await
-            .map_err(FlashError::Io)?;
-        self.file.write_all(buf).await.map_err(FlashError::Io)?;
+        let fd = self.file.as_raw_fd();
+        let ptr = buf.as_ptr() as usize;
+        let len = buf.len();
 
+        tokio::task::spawn_blocking(move || {
+            let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+
+            // Perform a positional write directly using the OS file descriptor
+            // This is completely compatible with O_DIRECT requirements
+            // Safety: reconstruct a BorrowedFd with a local lifetime inside the closure
+            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            rustix::io::pwrite(borrowed_fd, slice, offset)
+        })
+        .await
+        .map_err(|_| FlashError::SyncError)?
+        .map_err(std::io::Error::from)?; // Converts rustix error into std::io::Error
         Ok(())
     }
 
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<()> {
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .await
-            .map_err(FlashError::Io)?;
-        self.file.read_exact(buf).await.map_err(FlashError::Io)?;
+        let fd = self.file.as_raw_fd();
+        let ptr = buf.as_mut_ptr() as usize;
+        let len = buf.len();
+
+        tokio::task::spawn_blocking(move || {
+            let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
+
+            // Perform an exact positional read using the OS file descriptor
+            // Safety: reconstruct a BorrowedFd with a local lifetime inside the closure
+            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            rustix::io::pread(borrowed_fd, slice, offset)
+        })
+        .await
+        .map_err(|_| FlashError::SyncError)?
+        .map_err(std::io::Error::from)?;
         Ok(())
     }
 
