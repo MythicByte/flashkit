@@ -30,6 +30,10 @@ features = [
     "Win32_Storage",
     "Win32_System_Ioctl",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Devices",
+    "Win32_Devices_Properties",
+    "Win32_Devices_DeviceAndDriverInstallation",
 ]
 
 [lints.rust]

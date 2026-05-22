@@ -56,6 +56,9 @@ pub enum FlashError {
     #[error("A array was accesed out of bounds")]
     OutOfBoundsArray,
 
+    #[cfg(target_os = "windows")]
+    #[error(transparent)]
+    WindowsError(#[from] windows::core::Error),
     // Linux Errors only with D-bus
     #[cfg(target_os = "linux")]
     #[error(transparent)]
