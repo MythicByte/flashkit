@@ -1,6 +1,9 @@
-use std::path::{
-    Path,
-    PathBuf,
+use std::{
+    fmt::Display,
+    path::{
+        Path,
+        PathBuf,
+    },
 };
 
 /// Storage Device
@@ -74,7 +77,6 @@ pub enum Size {
     MegaByte(u64),
     GigaByte(u64),
 }
-
 /// Events to devices
 #[allow(missing_docs)]
 #[derive(Debug)]
@@ -213,6 +215,17 @@ impl FlashProgress {
         self.phase.clone()
     }
 }
+impl Display for Size {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Size::Bytes(x) => write!(f, "{} B", x),
+            Size::KiloByte(x) => write!(f, "{} KB", x),
+            Size::MegaByte(x) => write!(f, "{} MB", x),
+            Size::GigaByte(x) => write!(f, "{} GB", x),
+        }
+    }
+}
+
 /// generates from bytes rounded biggest value
 #[must_use]
 pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
