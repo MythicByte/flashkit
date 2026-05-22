@@ -70,10 +70,9 @@ where
 
         let buffer = PageAlignedBuffer::new(buffer_size / page_size).expect("error");
         // SAFETY: Buffer is page-aligned and size is multiple of page size
-        let mut buffer_slice =
-            unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer_size) };
+        let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer_size) };
         loop {
-            let read_back = source_of_image.file.read(&mut buffer_slice).await?;
+            let read_back = source_of_image.file.read(buffer_slice).await?;
 
             if read_back < buffer.size() {
                 if read_back == 0 {
@@ -85,13 +84,13 @@ where
                     }
                 }
                 handle_target_write_to
-                    .write_at(offset, &buffer_slice)
+                    .write_at(offset, buffer_slice)
                     .await?;
                 offset += read_back as u64;
                 break;
             } else {
                 handle_target_write_to
-                    .write_at(offset, &buffer_slice)
+                    .write_at(offset, buffer_slice)
                     .await?;
                 offset += read_back as u64
             }
@@ -168,13 +167,12 @@ where
 
         let buffer = PageAlignedBuffer::new(buffer_size / page_size).expect("error");
         // SAFETY: Buffer is page-aligned and size is multiple of page size
-        let mut buffer_slice =
-            unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer_size) };
+        let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer_size) };
         loop {
             if offset >= written_bytes {
                 break;
             }
-            let read_back = handle.read_at(offset, &mut buffer_slice).await?;
+            let read_back = handle.read_at(offset, buffer_slice).await?;
             if read_back == 0 {
                 break;
             }

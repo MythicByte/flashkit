@@ -8,8 +8,6 @@ use std::{
     ptr::NonNull,
 };
 
-use tracing::info;
-
 /// A aligned vec to page size
 #[derive(Debug)]
 pub struct PageAlignedBuffer {
@@ -20,7 +18,6 @@ impl PageAlignedBuffer {
     /// construct with size
     pub fn new(size: usize) -> Result<Self, LayoutError> {
         let page_size = rustix::param::page_size();
-        info!("page size: {}", page_size);
         let size_with_pages = page_size * size;
         let layout = Layout::from_size_align(size_with_pages, page_size)?;
         //Safety: we construct a allocation with pages sizes from os, this is why it can never be null

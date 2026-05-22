@@ -114,7 +114,7 @@ pub struct Flasher<T>
 where
     T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
 {
-    ///
+    /// interface
     pub interface: T,
 }
 
