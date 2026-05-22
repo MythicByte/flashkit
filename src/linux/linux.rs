@@ -9,17 +9,8 @@ use std::{
         BorrowedFd,
     },
     path::Path,
-    pin::Pin,
-    task::{
-        Context,
-        Poll,
-    },
 };
 
-use tokio::io::{
-    AsyncSeekExt,
-    ReadBuf,
-};
 use zbus::zvariant::{
     OwnedObjectPath,
     OwnedValue,

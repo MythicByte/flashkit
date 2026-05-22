@@ -59,17 +59,34 @@ where
         let mut timer = std::time::Instant::now();
         let mut bytes_since_last_report: u64 = 0;
         // Calculate buffer size aligned to both page size and sector size
+        let target_capacity = 1024 * 1024;
+
         let page_size = rustix::param::page_size();
         let sector_size = handle_target_write_to.sector_size();
-        // Find smallest multiple larger than or equal to 1024 that's aligned to max(page_size, sector_size)
-        let alignment = page_size.max(sector_size);
-        let mut buffer_size = 1024;
-        while buffer_size % alignment != 0 {
-            buffer_size += 1;
+
+        //  Mathematically compute the Least Common Multiple (LCM) to guarantee
+        //    alignment to BOTH page_size and sector_size under any configuration.
+        fn gcd(a: usize, b: usize) -> usize {
+            if b == 0 { a } else { gcd(b, a % b) }
+        }
+        fn lcm(a: usize, b: usize) -> usize {
+            if a == 0 || b == 0 {
+                0
+            } else {
+                (a * b) / gcd(a, b)
+            }
         }
 
-        let buffer = PageAlignedBuffer::new(buffer_size / page_size).expect("error");
-        // SAFETY: Buffer is page-aligned and size is multiple of page size
+        let alignment = lcm(page_size, sector_size);
+
+        //  Round up the target capacity to the nearest multiple of the combined alignment
+        let buffer_size = ((target_capacity + alignment - 1) / alignment) * alignment;
+
+        //  Since buffer_size is a guaranteed multiple of alignment, and alignment is
+        //    a multiple of page_size, buffer_size divides perfectly by page_size.
+        //    This eliminates the integer division truncation bug completely.
+        let pages_to_allocate = buffer_size / page_size;
+        let buffer = PageAlignedBuffer::new(pages_to_allocate).expect("Failed to allocate buffer"); // SAFETY: Buffer is page-aligned and size is multiple of page size
         let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer_size) };
         loop {
             let read_back = source_of_image.file.read(buffer_slice).await?;
@@ -155,17 +172,34 @@ where
         let mut hasher = Sha256::new();
         let mut offset = 0u64;
         let mut tmp_counter: u64 = 0;
-        // Calculate buffer size aligned to both page size and sector size
+        let target_capacity = 1024 * 1024;
+
         let page_size = rustix::param::page_size();
         let sector_size = handle.sector_size();
-        // Find smallest multiple larger than or equal to 1024 that's aligned to max(page_size, sector_size)
-        let alignment = page_size.max(sector_size);
-        let mut buffer_size = 1024;
-        while buffer_size % alignment != 0 {
-            buffer_size += 1;
+
+        //  Mathematically compute the Least Common Multiple (LCM) to guarantee
+        //    alignment to BOTH page_size and sector_size under any configuration.
+        fn gcd(a: usize, b: usize) -> usize {
+            if b == 0 { a } else { gcd(b, a % b) }
+        }
+        fn lcm(a: usize, b: usize) -> usize {
+            if a == 0 || b == 0 {
+                0
+            } else {
+                (a * b) / gcd(a, b)
+            }
         }
 
-        let buffer = PageAlignedBuffer::new(buffer_size / page_size).expect("error");
+        let alignment = lcm(page_size, sector_size);
+
+        //  Round up the target capacity to the nearest multiple of the combined alignment
+        let buffer_size = ((target_capacity + alignment - 1) / alignment) * alignment;
+
+        //  Since buffer_size is a guaranteed multiple of alignment, and alignment is
+        //    a multiple of page_size, buffer_size divides perfectly by page_size.
+        //    This eliminates the integer division truncation bug completely.
+        let pages_to_allocate = buffer_size / page_size;
+        let buffer = PageAlignedBuffer::new(pages_to_allocate).expect("Failed to allocate buffer");
         // SAFETY: Buffer is page-aligned and size is multiple of page size
         let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer_size) };
         loop {
