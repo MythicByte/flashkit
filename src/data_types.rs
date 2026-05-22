@@ -4,7 +4,7 @@ use std::path::{
 };
 
 /// Storage Device
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockDevice {
     /// Platform-native path: /dev/sdb, /dev/rdisk2, \\.\PhysicalDrive1
     pub path: PathBuf,
