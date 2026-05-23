@@ -12,7 +12,7 @@ pub enum FlashError {
     InsufficientPrivileges,
 
     #[error("The hash sh2 does not match")]
-    Sha2512HashDoesNotMatch,
+    Sha256HashDoesNotMatch,
 
     #[error("Device not found: {0}")]
     DeviceNotFound(PathBuf),
@@ -41,6 +41,8 @@ pub enum FlashError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    FromHexError(#[from] hex::FromHexError),
 
     #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
