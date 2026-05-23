@@ -1,4 +1,11 @@
-use tokio::io::AsyncReadExt;
+use sha2::{
+    Digest,
+    Sha256,
+};
+use tokio::io::{
+    AsyncBufReadExt,
+    AsyncReadExt,
+};
 use tracing::info;
 
 use crate::{
@@ -39,7 +46,29 @@ where
         T::Handle: RawWriteHandle,
     {
         on_progress
-            .send(FlashProgress::transition(FlashPhase::Unmounting))
+            .send(FlashProgress::create(FlashPhase::CheckingHash))
+            .map_err(|_| FlashError::SendChannelError)?;
+
+        if let Some(hash_test_against) = &source_of_image.expected_hash() {
+            let mut buff_reader = tokio::io::BufReader::new(source_of_image.file);
+            {
+                buff_reader.fill_buf().await?;
+                let mut hash_tester = Sha256::new();
+                while !buff_reader.buffer().is_empty() {
+                    hash_tester.update(&buff_reader.buffer());
+                    buff_reader.consume(buff_reader.buffer().len());
+                    buff_reader.fill_buf().await?;
+                }
+                let hash_finalized = hash_tester.finalize();
+                let hash_test_against = hex::decode(hash_test_against)?;
+                if hash_finalized.as_slice() != hash_test_against {
+                    return Err(FlashError::Sha256HashDoesNotMatch);
+                }
+            }
+            source_of_image.file = buff_reader.into_inner();
+        }
+        on_progress
+            .send(FlashProgress::create(FlashPhase::Unmounting))
             .map_err(|_| FlashError::SendChannelError)?;
         self.interface.unmount(device).await?;
 
@@ -128,14 +157,14 @@ where
             }
         }
         on_progress
-            .send(FlashProgress::transition(FlashPhase::Flushing))
+            .send(FlashProgress::create(FlashPhase::Flushing))
             .map_err(|_| FlashError::SendChannelError)?;
         handle_target_write_to.flush_to_disk().await?;
         handle_target_write_to
             .seek(std::io::SeekFrom::Start(0))
             .await?;
         on_progress
-            .send(FlashProgress::transition(FlashPhase::Verifying))
+            .send(FlashProgress::create(FlashPhase::Verifying))
             .map_err(|_| FlashError::SendChannelError)?;
         info!("Verifyer started");
         let sender = self
@@ -150,7 +179,7 @@ where
         self.interface.eject(device).await?;
 
         sender
-            .send(FlashProgress::transition(FlashPhase::Done))
+            .send(FlashProgress::create(FlashPhase::Done))
             .map_err(|_| FlashError::SendChannelError)?;
         Ok(())
     }

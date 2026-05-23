@@ -59,7 +59,7 @@ pub struct FlashProgress {
 #[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlashPhase {
-    Preparing,
+    CheckingHash,
     Unmounting,
     Writing,
     Flushing,
@@ -87,7 +87,7 @@ pub enum DeviceEvent {
 impl FlashProgress {
     /// how the flash transisiton states
     #[must_use]
-    pub fn transition(phase_state: FlashPhase) -> Self {
+    pub fn create(phase_state: FlashPhase) -> Self {
         FlashProgress {
             bytes_written: 0,
             total_bytes: 0,
