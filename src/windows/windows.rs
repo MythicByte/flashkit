@@ -22,7 +22,6 @@ use std::{
 use windows::{
     Win32::{
         Devices::DeviceAndDriverInstallation::{
-            DIGCF_DEVICEINTERFACE,
             DIGCF_PRESENT,
             SP_DEVINFO_DATA,
             SPDRP_FRIENDLYNAME,
@@ -34,7 +33,6 @@ use windows::{
         Foundation::{
             CloseHandle,
             HANDLE,
-            INVALID_HANDLE_VALUE,
         },
         Storage::FileSystem::{
             CreateFileW,
@@ -131,8 +129,6 @@ impl RawWriteHandle for WindowsRawWriteHandle {
         tokio::task::spawn_blocking(move || {
             let handle = send_handle;
             // Safety: `ptr`/`len` describe a slice owned by the caller that
-            // lives at least as long as the await point above.  spawn_blocking
-            // completes before the caller can drop the buffer.
             let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
 
             let mut overlapped = OVERLAPPED::default();
@@ -233,7 +229,6 @@ impl DeviceWriter for WindowsInterface {
     ///
     /// After opening, we attempt `FSCTL_LOCK_VOLUME` in a retry loop (up to
     /// 10 attempts × 500 ms) so that Windows releases any buffered filesystem
-    /// state — the same strategy used in Fedora Media Writer's
     /// `WinDiskManagement::lockDrive`.  The lock is held for the lifetime of
     /// the returned handle; closing the handle releases it automatically.
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
@@ -307,8 +302,8 @@ impl DeviceEnumerator for WindowsInterface {
         tokio::task::spawn_blocking(|| {
             let mut devices = Vec::new();
 
-            for i in 0u32..16 {
-                let path_str = format!(r"\\.\PhysicalDrive{}", i);
+            for device_number in 0u32..16 {
+                let path_str = format!(r"\\.\PhysicalDrive{}", device_number);
                 let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
                 let handle = unsafe {
@@ -324,7 +319,7 @@ impl DeviceEnumerator for WindowsInterface {
                 };
 
                 let handle = match handle {
-                    Ok(h) if h != INVALID_HANDLE_VALUE => h,
+                    Ok(h) if h.is_invalid() => h,
                     _ => continue,
                 };
 
@@ -353,7 +348,8 @@ impl DeviceEnumerator for WindowsInterface {
                 let size_bytes = geo.DiskSize as u64;
                 let sector_size = geo.Geometry.BytesPerSector as usize;
                 let is_removable = query_removable(&path_str).unwrap_or(false);
-                let name = get_friendly_name(i).unwrap_or_else(|| format!("Physical Drive {}", i));
+                let name = get_friendly_name(device_number)
+                    .unwrap_or_else(|| format!("Physical Drive {}", device_number));
 
                 devices.push(BlockDevice::new(
                     PathBuf::from(&path_str),
@@ -421,7 +417,6 @@ impl DeviceUnmounter for WindowsInterface {
     /// Dismount every volume on the target physical drive.
     ///
     /// This mirrors the `removeDriveLetters` + volume-dismount sequence from
-    /// Fedora Media Writer's `WinDiskManagement`:
     ///  1. Walk all system volumes via `FindFirstVolumeW` / `FindNextVolumeW`.
     ///  2. Identify which physical drive each volume lives on using
     ///     `IOCTL_STORAGE_GET_DEVICE_NUMBER`.
@@ -651,15 +646,7 @@ fn get_friendly_name(drive_index: u32) -> Option<String> {
         [0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18],
     );
 
-    let set = unsafe {
-        SetupDiGetClassDevsW(
-            Some(&disk_guid),
-            None,
-            None,
-            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
-        )
-        .ok()?
-    };
+    let set = unsafe { SetupDiGetClassDevsW(Some(&disk_guid), None, None, DIGCF_PRESENT).ok()? };
 
     let mut dev_info = SP_DEVINFO_DATA {
         cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
