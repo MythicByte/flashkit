@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use windows::Win32::System::SystemInformation::{
     GetSystemInfo,
     SYSTEM_INFO,
