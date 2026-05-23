@@ -11,6 +11,9 @@ pub enum FlashError {
     #[error("Insufficient privileges — run as root or administrator")]
     InsufficientPrivileges,
 
+    #[error("The hash sh2 does not match")]
+    Sha2512HashDoesNotMatch,
+
     #[error("Device not found: {0}")]
     DeviceNotFound(PathBuf),
 

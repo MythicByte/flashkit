@@ -30,7 +30,7 @@ pub struct AsyncImageSourceFile {
     pub file: tokio::fs::File,
     /// size end of the iso
     uncompressed_size: u64,
-    /// hash
+    /// hash checked after file input matches
     expected_hash: Option<[u8; 32]>,
 }
 /// Information about Mounted Partition
