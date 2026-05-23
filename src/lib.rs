@@ -10,7 +10,6 @@
 //!
 
 /// A aligned vec
-#[cfg(unix)]
 pub mod aligned;
 /// Libary Data types
 pub mod data_types;

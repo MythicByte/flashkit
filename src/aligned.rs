@@ -1,3 +1,8 @@
+use windows::Win32::System::SystemInformation::{
+    GetSystemInfo,
+    SYSTEM_INFO,
+};
+
 use std::{
     alloc::{
         Layout,
@@ -16,8 +21,23 @@ pub struct PageAlignedBuffer {
 }
 impl PageAlignedBuffer {
     /// construct with size
+    #[cfg(unix)]
     pub fn new(size: usize) -> Result<Self, LayoutError> {
         let page_size = rustix::param::page_size();
+        let size_with_pages = page_size * size;
+        let layout = Layout::from_size_align(size_with_pages, page_size)?;
+        //Safety: we construct a allocation with pages sizes from os, this is why it can never be null
+        let pointer = unsafe { alloc(layout) };
+        let pointer = NonNull::new(pointer).expect("Pointert error");
+        Ok(Self { pointer, layout })
+    }
+    /// construct with size
+    #[cfg(target_os = "windows")]
+    pub fn new(size: usize) -> Result<Self, LayoutError> {
+        // Safety: GetSystemInfo is always safe to call
+        let mut info = SYSTEM_INFO::default();
+        unsafe { GetSystemInfo(&mut info) };
+        let page_size = info.dwPageSize as usize;
         let size_with_pages = page_size * size;
         let layout = Layout::from_size_align(size_with_pages, page_size)?;
         //Safety: we construct a allocation with pages sizes from os, this is why it can never be null
