@@ -30,6 +30,7 @@ pub enum FlashError {
 
     #[error("Get exclusiv file lock failed for {device}: {reason}")]
     FileLockFailed { device: PathBuf, reason: String },
+
     #[error(
         "Verification failed — SHA256 mismatch with {failed_hash_hex} should have matched {expected_hex}"
     )]
@@ -46,6 +47,7 @@ pub enum FlashError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
     #[error(transparent)]
     FromHexError(#[from] hex::FromHexError),
 

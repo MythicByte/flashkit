@@ -65,7 +65,6 @@ pub enum FlashPhase {
     Writing,
     Flushing,
     Verifying,
-    VerifyingHashDoesNotMatch,
     Done,
 }
 /// when a hash assert failed
