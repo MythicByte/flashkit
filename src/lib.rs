@@ -15,6 +15,8 @@ pub mod aligned;
 pub mod data_types;
 /// Errors
 pub mod error;
+/// the flasher
+pub mod flasher;
 #[cfg(target_os = "linux")]
 /// Linux
 pub mod linux;

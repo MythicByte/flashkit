@@ -59,6 +59,7 @@ pub struct FlashProgress {
 #[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlashPhase {
+    Preparing,
     CheckingHash,
     Unmounting,
     Writing,
