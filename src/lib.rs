@@ -9,10 +9,14 @@
 //! - [ ] Macos
 //!
 
+/// A aligned vec
+pub mod aligned;
 /// Libary Data types
 pub mod data_types;
 /// Errors
 pub mod error;
+/// the flasher
+pub mod flasher;
 #[cfg(target_os = "linux")]
 /// Linux
 pub mod linux;
@@ -24,10 +28,16 @@ pub mod traits;
 #[cfg(target_os = "windows")]
 /// Windows
 pub mod windows;
+#[cfg(target_os = "windows")]
+use crate::windows::windows::WindowsInterface as Interface;
 
 #[cfg(target_os = "linux")]
-use linux::LinuxDBus as Interface;
+use crate::linux::linux::LinuxDBus as Interface;
 
+#[cfg(target_os = "macos")]
+use crate::macos::macos::DarwinInterface as Interface;
+
+#[allow(unused_imports)]
 use crate::{
     error::FlashResult,
     traits::Flasher,
@@ -37,8 +47,16 @@ use crate::{
 pub type OsFlasher = Flasher<Interface>;
 
 /// Automatically creates a Flasher configured for the current operating system.
-#[must_use]
+#[cfg(target_os = "linux")]
+#[must_use = "Use or remove libary"]
 pub async fn flash() -> FlashResult<OsFlasher> {
     let device = Interface::new().await?;
-    Ok(Flasher::new(device, 8 * 1024 * 1024))
+    Ok(Flasher::new(device))
+}
+/// Automatically creates a Flasher configured for the current operating system.
+#[cfg(target_os = "windows")]
+#[must_use = "Use or remove libary"]
+pub async fn flash() -> FlashResult<OsFlasher> {
+    let device = Interface;
+    Ok(Flasher::new(device))
 }

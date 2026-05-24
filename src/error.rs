@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use thiserror::Error;
+
+use crate::data_types::HashFailedWhen;
 /// Generic Result Type
 pub type FlashResult<T> = Result<T, FlashError>;
 
@@ -10,6 +12,9 @@ pub type FlashResult<T> = Result<T, FlashError>;
 pub enum FlashError {
     #[error("Insufficient privileges — run as root or administrator")]
     InsufficientPrivileges,
+
+    #[error("The hash sh2 does not match")]
+    Sha256HashDoesNotMatch(HashFailedWhen),
 
     #[error("Device not found: {0}")]
     DeviceNotFound(PathBuf),
@@ -25,6 +30,7 @@ pub enum FlashError {
 
     #[error("Get exclusiv file lock failed for {device}: {reason}")]
     FileLockFailed { device: PathBuf, reason: String },
+
     #[error(
         "Verification failed — SHA256 mismatch with {failed_hash_hex} should have matched {expected_hex}"
     )]
@@ -36,8 +42,14 @@ pub enum FlashError {
     #[error("A error with synchronisation has accourd")]
     SyncError,
 
+    #[error("The iso file size is {0} and the target is {1} what is too small")]
+    TargetToSmall(u64, u64),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    FromHexError(#[from] hex::FromHexError),
 
     #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
@@ -45,15 +57,28 @@ pub enum FlashError {
     #[error(transparent)]
     TryInt(#[from] std::num::TryFromIntError),
 
-    #[error(transparent)]
-    Zbus(#[from] zbus::Error),
-
     #[error("Sending with channel failed")]
     SendChannelError,
 
-    #[error(transparent)]
-    Fdo(#[from] zbus::fdo::Error),
+    #[error("Filesystem has send a error")]
+    FilesystemError(String),
+    #[error("Allocation Layout error")]
+    Layour(#[from] std::alloc::LayoutError),
 
     #[error("A array was accesed out of bounds")]
     OutOfBoundsArray,
+
+    #[cfg(target_os = "windows")]
+    #[error(transparent)]
+    WindowsError(#[from] windows::core::Error),
+    // Linux Errors only with D-bus
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    ZvariantError(#[from] zvariant::Error),
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Zbus(#[from] zbus::Error),
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Fdo(#[from] zbus::fdo::Error),
 }

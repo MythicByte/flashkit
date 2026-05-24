@@ -1,33 +1,13 @@
 use std::{
-    io::Read,
+    fmt::Display,
     path::{
         Path,
         PathBuf,
     },
-    pin::Pin,
-    task::{
-        Context,
-        Poll,
-    },
-};
-
-use tokio::io::{
-    AsyncBufRead,
-    AsyncRead,
-    AsyncReadExt,
-    ReadBuf,
-};
-
-use crate::{
-    error::{
-        FlashError,
-        FlashResult,
-    },
-    traits::ImageSource,
 };
 
 /// Storage Device
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockDevice {
     /// Platform-native path: /dev/sdb, /dev/rdisk2, \\.\PhysicalDrive1
     pub path: PathBuf,
@@ -42,28 +22,15 @@ pub struct BlockDevice {
     pub sector_size: usize,
 }
 
-/// How the file written is checked and information about it
-#[derive(Debug)]
-pub struct ImageSourceFile<R>
-where
-    R: Read,
-{
-    reader: R,
-    uncompressed_size: u64,
-    expected_hash: Option<[u8; 32]>,
-}
 /// How the async file written is checked and information about it
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct AsyncImageSourceFile<R>
-where
-    R: AsyncRead + AsyncReadExt,
-{
+pub struct AsyncImageSourceFile {
     /// file pointer
-    reader: tokio::io::BufReader<R>,
+    pub file: tokio::fs::File,
     /// size end of the iso
     uncompressed_size: u64,
-    /// hash
+    /// hash checked after file input matches
     expected_hash: Option<[u8; 32]>,
 }
 /// Information about Mounted Partition
@@ -93,11 +60,20 @@ pub struct FlashProgress {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlashPhase {
     Preparing,
+    CheckingHash,
     Unmounting,
     Writing,
     Flushing,
     Verifying,
     Done,
+}
+/// when a hash assert failed
+#[derive(Debug, Clone, PartialEq)]
+pub enum HashFailedWhen {
+    /// when the image is loaded for checking
+    FirstCheck,
+    /// integrity on the device itself
+    VerificationCheck,
 }
 
 /// The Devices Size rounded down
@@ -109,7 +85,6 @@ pub enum Size {
     MegaByte(u64),
     GigaByte(u64),
 }
-
 /// Events to devices
 #[allow(missing_docs)]
 #[derive(Debug)]
@@ -120,7 +95,7 @@ pub enum DeviceEvent {
 impl FlashProgress {
     /// how the flash transisiton states
     #[must_use]
-    pub fn transition(phase_state: FlashPhase) -> Self {
+    pub fn create(phase_state: FlashPhase) -> Self {
         FlashProgress {
             bytes_written: 0,
             total_bytes: 0,
@@ -177,45 +152,18 @@ impl BlockDevice {
         self.sector_size
     }
 }
-impl<R: Read> ImageSourceFile<R> {
+impl AsyncImageSourceFile {
     /// default constructor
-    pub fn new(reader: R, uncompressed_size: u64, expected_hash: Option<[u8; 32]>) -> Self {
+    pub fn new(
+        file: tokio::fs::File,
+        uncompressed_size: u64,
+        expected_hash: Option<[u8; 32]>,
+    ) -> Self {
         Self {
-            reader,
+            file,
             uncompressed_size,
             expected_hash,
         }
-    }
-}
-impl<R: AsyncRead + AsyncReadExt> AsyncImageSourceFile<R> {
-    /// default constructor
-    pub fn new(reader: R, uncompressed_size: u64, expected_hash: Option<[u8; 32]>) -> Self {
-        Self {
-            reader: tokio::io::BufReader::new(reader),
-            uncompressed_size,
-            expected_hash,
-        }
-    }
-}
-impl<R: AsyncRead + Unpin> AsyncRead for AsyncImageSourceFile<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.reader).poll_read(cx, buf)
-    }
-}
-
-/// Delegate `AsyncBufRead` to the internal `BufReader`.
-impl<R: AsyncRead + Unpin> AsyncBufRead for AsyncImageSourceFile<R> {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
-        // `get_mut` is safe here because we are not moving out of `self`.
-        Pin::new(&mut self.get_mut().reader).poll_fill_buf(cx)
-    }
-
-    fn consume(mut self: Pin<&mut Self>, amt: usize) {
-        Pin::new(&mut self.reader).consume(amt);
     }
 }
 
@@ -223,35 +171,18 @@ impl<R: AsyncRead + Unpin> AsyncBufRead for AsyncImageSourceFile<R> {
 ///
 /// `read_chunk` is intentionally unused — `Flasher::flash` reads via
 /// `AsyncBufRead`; calling `read_chunk` on this type is a programming error.
-impl<R: AsyncRead + Unpin> ImageSource for AsyncImageSourceFile<R> {
-    fn uncompressed_size(&self) -> u64 {
+impl AsyncImageSourceFile {
+    /// size
+    pub fn uncompressed_size(&self) -> u64 {
         self.uncompressed_size
     }
 
-    fn read_chunk(&mut self, _buf: &mut [u8]) -> FlashResult<usize> {
-        Err(FlashError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "AsyncImageSourceFile uses AsyncRead; read_chunk must not be called",
-        )))
-    }
-
-    fn expected_hash(&self) -> Option<[u8; 32]> {
+    /// Hash
+    pub fn expected_hash(&self) -> Option<[u8; 32]> {
         self.expected_hash
     }
 }
 
-impl<R: Read> ImageSource for ImageSourceFile<R> {
-    fn uncompressed_size(&self) -> u64 {
-        self.uncompressed_size
-    }
-
-    fn read_chunk(&mut self, buf: &mut [u8]) -> FlashResult<usize> {
-        self.reader.read(buf).map_err(FlashError::Io)
-    }
-    fn expected_hash(&self) -> Option<[u8; 32]> {
-        self.expected_hash
-    }
-}
 impl MountedPartition {
     /// gives device path back
     #[must_use]
@@ -292,11 +223,17 @@ impl FlashProgress {
         self.phase.clone()
     }
 }
-impl<R: std::io::Read> std::io::Read for ImageSourceFile<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.reader.read(buf)
+impl Display for Size {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Size::Bytes(x) => write!(f, "{} B", x),
+            Size::KiloByte(x) => write!(f, "{} KB", x),
+            Size::MegaByte(x) => write!(f, "{} MB", x),
+            Size::GigaByte(x) => write!(f, "{} GB", x),
+        }
     }
 }
+
 /// generates from bytes rounded biggest value
 #[must_use]
 pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
