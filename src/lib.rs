@@ -20,7 +20,7 @@ pub mod flasher;
 #[cfg(target_os = "linux")]
 /// Linux
 pub mod linux;
-// #[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")]
 /// Macos
 pub mod macos;
 /// Generic Traits abstraction
