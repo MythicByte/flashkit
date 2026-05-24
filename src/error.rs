@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use thiserror::Error;
+
+use crate::data_types::HashFailedWhen;
 /// Generic Result Type
 pub type FlashResult<T> = Result<T, FlashError>;
 
@@ -12,7 +14,7 @@ pub enum FlashError {
     InsufficientPrivileges,
 
     #[error("The hash sh2 does not match")]
-    Sha256HashDoesNotMatch,
+    Sha256HashDoesNotMatch(HashFailedWhen),
 
     #[error("Device not found: {0}")]
     DeviceNotFound(PathBuf),

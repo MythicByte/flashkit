@@ -5,6 +5,7 @@ use sha2::{
 use tokio::io::{
     AsyncBufReadExt,
     AsyncReadExt,
+    AsyncSeekExt,
 };
 use tracing::info;
 
@@ -15,6 +16,7 @@ use crate::{
         BlockDevice,
         FlashPhase,
         FlashProgress,
+        HashFailedWhen,
     },
     error::{
         FlashError,
@@ -62,11 +64,19 @@ where
                 let hash_finalized = hash_tester.finalize();
                 let hash_test_against = hex::decode(hash_test_against)?;
                 if hash_finalized.as_slice() != hash_test_against {
-                    return Err(FlashError::Sha256HashDoesNotMatch);
+                    return Err(FlashError::Sha256HashDoesNotMatch(
+                        HashFailedWhen::FirstCheck,
+                    ));
                 }
             }
             source_of_image.file = buff_reader.into_inner();
         }
+        // go the beginning again
+        source_of_image
+            .file
+            .seek(std::io::SeekFrom::Start(0))
+            .await?;
+
         on_progress
             .send(FlashProgress::create(FlashPhase::Unmounting))
             .map_err(|_| FlashError::SendChannelError)?;

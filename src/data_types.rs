@@ -67,6 +67,14 @@ pub enum FlashPhase {
     VerifyingHashDoesNotMatch,
     Done,
 }
+/// when a hash assert failed
+#[derive(Debug, Clone, PartialEq)]
+pub enum HashFailedWhen {
+    /// when the image is loaded for checking
+    FirstCheck,
+    /// integrity on the device itself
+    VerificationCheck,
+}
 
 /// The Devices Size rounded down
 #[allow(missing_docs)]
