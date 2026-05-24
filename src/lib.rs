@@ -20,7 +20,7 @@ pub mod flasher;
 #[cfg(target_os = "linux")]
 /// Linux
 pub mod linux;
-#[cfg(target_os = "macos")]
+// #[cfg(target_os = "macos")]
 /// Macos
 pub mod macos;
 /// Generic Traits abstraction
@@ -34,10 +34,10 @@ use crate::windows::windows::WindowsInterface as Interface;
 #[cfg(target_os = "linux")]
 use crate::linux::linux::LinuxDBus as Interface;
 
-use crate::{
-    error::FlashResult,
-    traits::Flasher,
-};
+#[cfg(target_os = "macos")]
+use crate::macos::macos::DarwinInterface as Interface;
+
+use crate::traits::Flasher;
 
 /// The platform-native Flasher type
 pub type OsFlasher = Flasher<Interface>;
