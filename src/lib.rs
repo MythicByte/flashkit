@@ -37,7 +37,11 @@ use crate::linux::linux::LinuxDBus as Interface;
 #[cfg(target_os = "macos")]
 use crate::macos::macos::DarwinInterface as Interface;
 
-use crate::traits::Flasher;
+#[allow(unused_imports)]
+use crate::{
+    error::FlashResult,
+    traits::Flasher,
+};
 
 /// The platform-native Flasher type
 pub type OsFlasher = Flasher<Interface>;
