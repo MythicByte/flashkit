@@ -41,6 +41,9 @@ pub enum FlashError {
     #[error("A error with synchronisation has accourd")]
     SyncError,
 
+    #[error("The iso file size is {0} and the target is {1} what is too small")]
+    TargetToSmall(u64, u64),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
