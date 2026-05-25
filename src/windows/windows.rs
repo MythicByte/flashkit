@@ -1,93 +1,44 @@
 use crate::{
     data_types::BlockDevice,
-    error::{
-        FlashError,
-        FlashResult,
-    },
+    error::{FlashError, FlashResult},
 };
 use std::{
     io::SeekFrom,
     mem::size_of,
-    os::windows::io::{
-        AsRawHandle,
-        FromRawHandle,
-    },
-    path::{
-        Path,
-        PathBuf,
-    },
+    os::windows::io::{AsRawHandle, FromRawHandle},
+    path::{Path, PathBuf},
     thread,
     time::Duration,
 };
 use windows::{
     Win32::{
         Devices::DeviceAndDriverInstallation::{
-            DIGCF_PRESENT,
-            SP_DEVINFO_DATA,
-            SPDRP_FRIENDLYNAME,
-            SetupDiDestroyDeviceInfoList,
-            SetupDiEnumDeviceInfo,
-            SetupDiGetClassDevsW,
-            SetupDiGetDeviceRegistryPropertyW,
+            DIGCF_PRESENT, SP_DEVINFO_DATA, SPDRP_FRIENDLYNAME, SetupDiDestroyDeviceInfoList,
+            SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceRegistryPropertyW,
         },
-        Foundation::{
-            CloseHandle,
-            HANDLE,
-        },
+        Foundation::{CloseHandle, HANDLE},
         Storage::FileSystem::{
-            CreateFileW,
-            DeleteVolumeMountPointW,
-            FILE_BEGIN,
-            FILE_CURRENT,
-            FILE_END,
-            FILE_FLAGS_AND_ATTRIBUTES,
-            FILE_GENERIC_READ,
-            FILE_GENERIC_WRITE,
-            FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
-            FindFirstVolumeW,
-            FindNextVolumeW,
-            FindVolumeClose,
-            FlushFileBuffers,
-            GetVolumePathNamesForVolumeNameW,
-            OPEN_EXISTING,
-            ReadFile,
-            SetFilePointerEx,
-            WriteFile,
+            CreateFileW, DeleteVolumeMountPointW, FILE_BEGIN, FILE_CURRENT, FILE_END,
+            FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, FlushFileBuffers,
+            GetVolumePathNamesForVolumeNameW, OPEN_EXISTING, ReadFile, SetFilePointerEx, WriteFile,
         },
         System::{
-            IO::{
-                DeviceIoControl,
-                OVERLAPPED,
-            },
+            IO::{DeviceIoControl, OVERLAPPED},
             Ioctl::{
-                DISK_GEOMETRY_EX,
-                FSCTL_DISMOUNT_VOLUME,
-                FSCTL_LOCK_VOLUME,
-                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-                IOCTL_STORAGE_EJECT_MEDIA,
-                IOCTL_STORAGE_GET_DEVICE_NUMBER,
-                IOCTL_STORAGE_QUERY_PROPERTY,
-                PropertyStandardQuery,
-                STORAGE_DEVICE_DESCRIPTOR,
-                STORAGE_DEVICE_NUMBER,
-                STORAGE_PROPERTY_QUERY,
-                StorageDeviceProperty,
+                DISK_GEOMETRY_EX, FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_STORAGE_EJECT_MEDIA,
+                IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY,
+                PropertyStandardQuery, STORAGE_DEVICE_DESCRIPTOR, STORAGE_DEVICE_NUMBER,
+                STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
             },
         },
     },
-    core::{
-        GUID,
-        PCWSTR,
-    },
+    core::{GUID, PCWSTR},
 };
 
 use crate::traits::{
-    DeviceEjector,
-    DeviceEnumerator,
-    DeviceUnmounter,
-    DeviceWriter,
-    RawWriteHandle,
+    DeviceEjector, DeviceEnumerator, DeviceUnmounter, DeviceWriter, RawWriteHandle,
 };
 
 /// Wraps [`HANDLE`] to make it [`Send`].
@@ -101,7 +52,7 @@ struct SendHandle(HANDLE);
 unsafe impl Send for SendHandle {}
 
 #[allow(missing_docs)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WindowsInterface;
 
 #[allow(missing_docs)]
