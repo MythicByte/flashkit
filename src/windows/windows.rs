@@ -319,7 +319,7 @@ impl DeviceEnumerator for WindowsInterface {
                 };
 
                 let handle = match handle {
-                    Ok(h) if h.is_invalid() => h,
+                    Ok(h) if !h.is_invalid() => h,
                     _ => continue,
                 };
 
