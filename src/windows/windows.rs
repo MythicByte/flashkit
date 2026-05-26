@@ -20,6 +20,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tokio::fs::File;
 use windows::{
     Win32::{
         Foundation::{
@@ -32,6 +33,8 @@ use windows::{
             FILE_BEGIN,
             FILE_CURRENT,
             FILE_END,
+            FILE_FLAG_NO_BUFFERING,
+            FILE_FLAG_WRITE_THROUGH,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
@@ -244,45 +247,12 @@ impl DeviceWriter for WindowsInterface {
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     None,
                     OPEN_EXISTING,
-                    FILE_FLAGS_AND_ATTRIBUTES(0),
+                    FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
                     None,
                 )
                 .map_err(FlashError::WindowsError)?
             };
-
-            // Retry FSCTL_LOCK_VOLUME so transient filesystem activity
-            // (e.g. Explorer thumbnailing) doesn't cause an immediate failure.
-            let mut locked = false;
-            for _ in 0..10 {
-                let mut returned = 0u32;
-                if unsafe {
-                    DeviceIoControl(
-                        handle,
-                        FSCTL_LOCK_VOLUME,
-                        None,
-                        0,
-                        None,
-                        0,
-                        Some(&mut returned),
-                        None,
-                    )
-                }
-                .is_ok()
-                {
-                    locked = true;
-                    break;
-                }
-                thread::sleep(Duration::from_millis(500));
-            }
-
-            if !locked {
-                unsafe { CloseHandle(handle).ok() };
-                return Err(FlashError::DeviceBusy { path });
-            }
-
-            // Transfer ownership to std::fs::File.  Its Drop impl calls
-            // CloseHandle, which also releases the FSCTL_LOCK_VOLUME lock.
-            let file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+            let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
             Ok(WindowsRawWriteHandle {
                 file,
                 sector_size,
