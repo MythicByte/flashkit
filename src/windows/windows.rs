@@ -273,11 +273,7 @@ impl DeviceEnumerator for WindowsInterface {
             let devices = drives
                 .into_iter()
                 .map(|d| {
-                    let size_bytes = d
-                        .size
-                        .as_deref()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
+                    let size_bytes = d.size.unwrap_or(0);
                     let is_removable = d
                         .media_type
                         .as_deref()
