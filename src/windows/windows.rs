@@ -7,17 +7,24 @@ use crate::{
 };
 use serde::Deserialize;
 use std::{
-    io::SeekFrom,
+    io::{
+        Seek,
+        SeekFrom,
+    },
     mem::size_of,
-    os::windows::io::{
-        AsRawHandle,
-        FromRawHandle,
+    os::windows::{
+        fs::FileExt,
+        io::{
+            AsRawHandle,
+            FromRawHandle,
+        },
     },
     path::{
         Path,
         PathBuf,
     },
 };
+use tracing::info;
 use windows::{
     Win32::{
         Foundation::{
@@ -27,9 +34,6 @@ use windows::{
         Storage::FileSystem::{
             CreateFileW,
             DeleteVolumeMountPointW,
-            FILE_BEGIN,
-            FILE_CURRENT,
-            FILE_END,
             FILE_FLAG_NO_BUFFERING,
             FILE_FLAG_WRITE_THROUGH,
             FILE_FLAGS_AND_ATTRIBUTES,
@@ -43,15 +47,9 @@ use windows::{
             FlushFileBuffers,
             GetVolumePathNamesForVolumeNameW,
             OPEN_EXISTING,
-            ReadFile,
-            SetFilePointerEx,
-            WriteFile,
         },
         System::{
-            IO::{
-                DeviceIoControl,
-                OVERLAPPED,
-            },
+            IO::DeviceIoControl,
             Ioctl::{
                 FSCTL_DISMOUNT_VOLUME,
                 IOCTL_STORAGE_EJECT_MEDIA,
@@ -109,39 +107,15 @@ pub struct WindowsRawWriteHandle {
 }
 
 impl RawWriteHandle for WindowsRawWriteHandle {
-    /// Positional write via `WriteFile` + `OVERLAPPED`.
-    ///
-    /// Even on handles NOT opened with `FILE_FLAG_OVERLAPPED`, Windows
-    /// honours the `Offset`/`OffsetHigh` fields of an `OVERLAPPED` struct
-    /// to select the write position, completing the call synchronously.
-    /// This is the Windows equivalent of `pwrite(2)`.
     async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        // Wrap in SendHandle before moving into spawn_blocking so the closure
-        // is `'static + Send`.  All other methods below follow the same pattern.
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
+        info!("Funcion started write");
+        let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         let ptr = buf.as_ptr() as usize;
         let len = buf.len();
 
         tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
-            // Safety: `ptr`/`len` describe a slice owned by the caller that
             let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-
-            let mut overlapped = OVERLAPPED::default();
-
-            overlapped.Anonymous.Anonymous.Offset = offset as u32;
-            overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-
-            let mut bytes_written = 0u32;
-            unsafe {
-                WriteFile(
-                    handle.0,
-                    Some(slice),
-                    Some(&mut bytes_written),
-                    Some(&mut overlapped),
-                )
-                .map_err(FlashError::WindowsError)
-            }
+            fd.seek_write(slice, offset)
         })
         .await
         .map_err(|_| FlashError::SyncError)??;
@@ -150,29 +124,14 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 
     /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
+        info!("Funcion started read");
+        let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         let ptr = buf.as_mut_ptr() as usize;
         let len = buf.len();
 
         let bytes_read = tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
             let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-
-            let mut overlapped = OVERLAPPED::default();
-            overlapped.Anonymous.Anonymous.Offset = offset as u32;
-            overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-
-            let mut bytes_read = 0u32;
-            unsafe {
-                ReadFile(
-                    handle.0,
-                    Some(slice),
-                    Some(&mut bytes_read),
-                    Some(&mut overlapped),
-                )
-                .map_err(FlashError::WindowsError)?;
-            }
-            Ok::<usize, FlashError>(bytes_read as usize)
+            fd.seek_read(slice, offset)
         })
         .await
         .map_err(|_| FlashError::SyncError)??;
@@ -181,6 +140,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 
     /// Flush kernel write buffers to physical media via `FlushFileBuffers`.
     async fn flush_to_disk(&mut self) -> FlashResult<()> {
+        info!("Funcion started flush");
         let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
         tokio::task::spawn_blocking(move || unsafe {
             let handle = send_handle;
@@ -200,20 +160,11 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
-        tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
-            let (method, dist) = match seek {
-                SeekFrom::Start(n) => (FILE_BEGIN, n as i64),
-                SeekFrom::Current(n) => (FILE_CURRENT, n),
-                SeekFrom::End(n) => (FILE_END, n),
-            };
-            unsafe {
-                SetFilePointerEx(handle.0, dist, None, method).map_err(FlashError::WindowsError)
-            }
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
+        info!("Funcion started seek");
+        let mut fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
+        tokio::task::spawn_blocking(move || fd.seek(seek))
+            .await
+            .map_err(|_| FlashError::SyncError)??;
         Ok(())
     }
 }
@@ -228,6 +179,7 @@ impl DeviceWriter for WindowsInterface {
     /// `WinDiskManagement::lockDrive`.  The lock is held for the lifetime of
     /// the returned handle; closing the handle releases it automatically.
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
+        info!("Funcion started open for writing");
         let path = device.path.clone();
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
@@ -262,6 +214,7 @@ impl DeviceWriter for WindowsInterface {
 
 impl DeviceEnumerator for WindowsInterface {
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
+        info!("Funcion started list_devices");
         tokio::task::spawn_blocking(|| {
             let wmi = WMIConnection::new()
                 .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
@@ -299,6 +252,7 @@ impl DeviceEnumerator for WindowsInterface {
 
 impl DeviceEjector for WindowsInterface {
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
+        info!("Funcion started eject");
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || -> FlashResult<()> {
             unmount_volumes_on_drive(&path)?;
@@ -352,6 +306,7 @@ impl DeviceUnmounter for WindowsInterface {
     ///  3. For matching volumes: remove mount-point paths with
     ///     `DeleteVolumeMountPointW`, then issue `FSCTL_DISMOUNT_VOLUME`.
     async fn unmount(&self, device: &BlockDevice) -> FlashResult<()> {
+        info!("Funcion started unmount");
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || unmount_volumes_on_drive(&path))
             .await
