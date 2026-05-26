@@ -5,6 +5,7 @@ use crate::{
         FlashResult,
     },
 };
+use serde::Deserialize;
 use std::{
     io::SeekFrom,
     mem::size_of,
@@ -21,15 +22,6 @@ use std::{
 };
 use windows::{
     Win32::{
-        Devices::DeviceAndDriverInstallation::{
-            DIGCF_PRESENT,
-            SP_DEVINFO_DATA,
-            SPDRP_FRIENDLYNAME,
-            SetupDiDestroyDeviceInfoList,
-            SetupDiEnumDeviceInfo,
-            SetupDiGetClassDevsW,
-            SetupDiGetDeviceRegistryPropertyW,
-        },
         Foundation::{
             CloseHandle,
             HANDLE,
@@ -61,25 +53,19 @@ use windows::{
                 OVERLAPPED,
             },
             Ioctl::{
-                DISK_GEOMETRY_EX,
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
-                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
-                IOCTL_STORAGE_QUERY_PROPERTY,
-                PropertyStandardQuery,
-                STORAGE_DEVICE_DESCRIPTOR,
                 STORAGE_DEVICE_NUMBER,
-                STORAGE_PROPERTY_QUERY,
-                StorageDeviceProperty,
             },
         },
     },
-    core::{
-        GUID,
-        PCWSTR,
-    },
+    core::PCWSTR,
+};
+use wmi::{
+    WMIConnection,
+    WMIError,
 };
 
 use crate::traits::{
@@ -89,6 +75,17 @@ use crate::traits::{
     DeviceWriter,
     RawWriteHandle,
 };
+#[derive(Deserialize)]
+#[serde(rename = "Win32_DiskDrive")]
+#[serde(rename_all = "PascalCase")]
+struct Win32DiskDrive {
+    #[serde(rename = "DeviceID")]
+    device_id: String, // "\\.\PhysicalDrive0"
+    model: String,        // "Samsung USB Drive"
+    size: Option<String>, // WMI returns bytes as a string, can be None
+    bytes_per_sector: u32,
+    media_type: Option<String>, // "Removable Media" / "Fixed hard disk media"
+}
 
 /// Wraps [`HANDLE`] to make it [`Send`].
 ///
@@ -300,72 +297,41 @@ impl DeviceWriter for WindowsInterface {
 impl DeviceEnumerator for WindowsInterface {
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
         tokio::task::spawn_blocking(|| {
-            let mut devices = Vec::new();
+            let wmi = WMIConnection::new()
+                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
 
-            for device_number in 0u32..16 {
-                let path_str = format!(r"\\.\PhysicalDrive{}", device_number);
-                let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+            let drives: Vec<Win32DiskDrive> = wmi
+                .query()
+                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
 
-                let handle = unsafe {
-                    CreateFileW(
-                        PCWSTR(wide.as_ptr()),
-                        0, // zero access — enough to issue IOCTLs
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        None,
-                        OPEN_EXISTING,
-                        FILE_FLAGS_AND_ATTRIBUTES(0),
-                        None,
+            let devices = drives
+                .into_iter()
+                .map(|d| {
+                    let size_bytes = d
+                        .size
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    let is_removable = d
+                        .media_type
+                        .as_deref()
+                        .map(|m| m.contains("Removable"))
+                        .unwrap_or(false);
+
+                    BlockDevice::new(
+                        PathBuf::from(&d.device_id),
+                        d.model,
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
                     )
-                };
-
-                let handle = match handle {
-                    Ok(h) if h.is_invalid() => h,
-                    _ => continue,
-                };
-
-                let mut geo = DISK_GEOMETRY_EX::default();
-                let mut returned = 0u32;
-
-                let geo_ok = unsafe {
-                    DeviceIoControl(
-                        handle,
-                        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-                        None,
-                        0,
-                        Some(&mut geo as *mut _ as *mut _),
-                        size_of::<DISK_GEOMETRY_EX>() as u32,
-                        Some(&mut returned),
-                        None,
-                    )
-                };
-
-                unsafe { CloseHandle(handle).ok() };
-
-                if geo_ok.is_err() {
-                    continue;
-                }
-
-                let size_bytes = geo.DiskSize as u64;
-                let sector_size = geo.Geometry.BytesPerSector as usize;
-                let is_removable = query_removable(&path_str).unwrap_or(false);
-                let name = get_friendly_name(device_number)
-                    .unwrap_or_else(|| format!("Physical Drive {}", device_number));
-
-                devices.push(BlockDevice::new(
-                    PathBuf::from(&path_str),
-                    name,
-                    size_bytes,
-                    is_removable,
-                    sector_size,
-                ));
-            }
+                })
+                .collect();
 
             Ok(devices)
         })
         .await
-        .map_err(|_| FlashError::DeviceBusy {
-            path: PathBuf::new(),
-        })?
+        .map_err(|_| FlashError::SyncError)?
     }
 }
 
@@ -584,110 +550,4 @@ fn remove_mount_points(guid_path: &str) {
         }
         offset += term + 1;
     }
-}
-
-fn query_removable(path: &str) -> Option<bool> {
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,
-        )
-        .ok()?
-    };
-
-    let query = STORAGE_PROPERTY_QUERY {
-        PropertyId: StorageDeviceProperty,
-        QueryType: PropertyStandardQuery,
-        AdditionalParameters: [0],
-    };
-
-    let mut buf = vec![0u8; 1024];
-    let mut returned = 0u32;
-
-    let ok = unsafe {
-        DeviceIoControl(
-            handle,
-            IOCTL_STORAGE_QUERY_PROPERTY,
-            Some(&query as *const _ as *const _),
-            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(buf.as_mut_ptr() as *mut _),
-            buf.len() as u32,
-            Some(&mut returned),
-            None,
-        )
-    };
-
-    unsafe { CloseHandle(handle).ok() };
-
-    if ok.is_err() {
-        return None;
-    }
-
-    // Safety: the IOCTL filled at least sizeof(STORAGE_DEVICE_DESCRIPTOR) bytes
-    // into `buf`, which is large enough (1 KiB).
-    let desc = unsafe { &*(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR) };
-    // In windows-crate 0.62, RemovableMedia is already `bool`.
-    Some(desc.RemovableMedia)
-}
-
-fn get_friendly_name(drive_index: u32) -> Option<String> {
-    // Disk class GUID: {4D36E967-E325-11CE-BFC1-08002BE10318}
-    let disk_guid = GUID::from_values(
-        0x4D36E967,
-        0xE325,
-        0x11CE,
-        [0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18],
-    );
-
-    let set = unsafe { SetupDiGetClassDevsW(Some(&disk_guid), None, None, DIGCF_PRESENT).ok()? };
-
-    let mut dev_info = SP_DEVINFO_DATA {
-        cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
-        ..Default::default()
-    };
-
-    // Enumerate device at `drive_index`.  On failure always destroy the set.
-    if unsafe { SetupDiEnumDeviceInfo(set, drive_index, &mut dev_info) }.is_err() {
-        unsafe { SetupDiDestroyDeviceInfoList(set).ok() };
-        return None;
-    }
-
-    // The property value is stored as UTF-16 bytes.  The windows-crate 0.62
-    // API takes `Option<&mut [u8]>` (buffer length is inferred from the slice
-    // length), replacing the old separate `cbPropertyBufferSize: u32` argument.
-    let mut buf = vec![0u8; 512]; // 256 UTF-16 code units × 2 bytes each
-
-    let prop_result = unsafe {
-        SetupDiGetDeviceRegistryPropertyW(
-            set,
-            &dev_info,
-            SPDRP_FRIENDLYNAME,
-            None, // don't need the registry type tag
-            Some(&mut buf),
-            None, // don't need the required-size hint
-        )
-    };
-
-    // Always destroy the device-info set, even if the property query failed.
-    unsafe { SetupDiDestroyDeviceInfoList(set).ok() };
-
-    prop_result.ok()?;
-
-    // Reinterpret the raw bytes as a UTF-16 string and strip the null terminator.
-    // Safety: `buf` is aligned to 1 byte; `from_raw_parts` with `*const u16`
-    // requires only that the pointer is valid for `len` u16 reads, which it is.
-    let u16_slice =
-        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, buf.len() / 2) };
-    let end = u16_slice
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(u16_slice.len());
-    Some(String::from_utf16_lossy(&u16_slice[..end]))
 }
