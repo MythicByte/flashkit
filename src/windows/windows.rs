@@ -17,10 +17,7 @@ use std::{
         Path,
         PathBuf,
     },
-    thread,
-    time::Duration,
 };
-use tokio::fs::File;
 use windows::{
     Win32::{
         Foundation::{
@@ -57,7 +54,6 @@ use windows::{
             },
             Ioctl::{
                 FSCTL_DISMOUNT_VOLUME,
-                FSCTL_LOCK_VOLUME,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
@@ -84,8 +80,8 @@ use crate::traits::{
 struct Win32DiskDrive {
     #[serde(rename = "DeviceID")]
     device_id: String, // "\\.\PhysicalDrive0"
-    model: String,        // "Samsung USB Drive"
-    size: Option<String>, // WMI returns bytes as a string, can be None
+    model: String, // "Samsung USB Drive"
+    size: Option<u64>,
     bytes_per_sector: u32,
     media_type: Option<String>, // "Removable Media" / "Fixed hard disk media"
 }
