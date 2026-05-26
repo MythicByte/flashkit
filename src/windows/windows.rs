@@ -452,7 +452,8 @@ fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
 /// Parse the drive number from a path like `\\.\PhysicalDrive2` → `2`.
 fn physical_drive_number(path: &Path) -> FlashResult<u32> {
     let s = path.to_string_lossy();
-    s.rsplit("PhysicalDrive")
+    s.to_ascii_uppercase()
+        .rsplit("PHYSICALDRIVE")
         .next()
         .and_then(|n| n.trim().parse().ok())
         .ok_or_else(|| FlashError::FilesystemError(format!("cannot parse drive number from '{s}'")))
