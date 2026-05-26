@@ -309,6 +309,7 @@ impl DeviceEjector for WindowsInterface {
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || -> FlashResult<()> {
+            unmount_volumes_on_drive(&path)?;
             let path_str = path.to_string_lossy().to_string();
             let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
