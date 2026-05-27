@@ -1,78 +1,40 @@
 use crate::{
     data_types::BlockDevice,
-    error::{
-        FlashError,
-        FlashResult,
-    },
+    error::{FlashError, FlashResult},
 };
 use serde::Deserialize;
 use std::{
-    io::SeekFrom,
+    io::{Seek, SeekFrom},
     mem::size_of,
-    os::windows::io::{
-        AsRawHandle,
-        FromRawHandle,
+    os::windows::{
+        fs::FileExt,
+        io::{AsRawHandle, FromRawHandle},
     },
-    path::{
-        Path,
-        PathBuf,
-    },
+    path::{Path, PathBuf},
 };
 use windows::{
     Win32::{
-        Foundation::{
-            CloseHandle,
-            HANDLE,
-        },
+        Foundation::{CloseHandle, HANDLE},
         Storage::FileSystem::{
-            CreateFileW,
-            DeleteVolumeMountPointW,
-            FILE_BEGIN,
-            FILE_CURRENT,
-            FILE_END,
-            FILE_FLAG_NO_BUFFERING,
-            FILE_FLAG_WRITE_THROUGH,
-            FILE_FLAGS_AND_ATTRIBUTES,
-            FILE_GENERIC_READ,
-            FILE_GENERIC_WRITE,
-            FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
-            FindFirstVolumeW,
-            FindNextVolumeW,
-            FindVolumeClose,
-            FlushFileBuffers,
-            GetVolumePathNamesForVolumeNameW,
-            OPEN_EXISTING,
-            ReadFile,
-            SetFilePointerEx,
-            WriteFile,
+            CreateFileW, DeleteVolumeMountPointW, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, FlushFileBuffers,
+            GetVolumePathNamesForVolumeNameW, OPEN_EXISTING,
         },
         System::{
-            IO::{
-                DeviceIoControl,
-                OVERLAPPED,
-            },
+            IO::DeviceIoControl,
             Ioctl::{
-                FSCTL_DISMOUNT_VOLUME,
-                IOCTL_STORAGE_EJECT_MEDIA,
-                IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                FSCTL_DISMOUNT_VOLUME, IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
             },
         },
     },
     core::PCWSTR,
 };
-use wmi::{
-    WMIConnection,
-    WMIError,
-};
+use wmi::{WMIConnection, WMIError};
 
 use crate::traits::{
-    DeviceEjector,
-    DeviceEnumerator,
-    DeviceUnmounter,
-    DeviceWriter,
-    RawWriteHandle,
+    DeviceEjector, DeviceEnumerator, DeviceUnmounter, DeviceWriter, RawWriteHandle,
 };
 #[derive(Deserialize)]
 #[serde(rename = "Win32_DiskDrive")]
@@ -109,39 +71,14 @@ pub struct WindowsRawWriteHandle {
 }
 
 impl RawWriteHandle for WindowsRawWriteHandle {
-    /// Positional write via `WriteFile` + `OVERLAPPED`.
-    ///
-    /// Even on handles NOT opened with `FILE_FLAG_OVERLAPPED`, Windows
-    /// honours the `Offset`/`OffsetHigh` fields of an `OVERLAPPED` struct
-    /// to select the write position, completing the call synchronously.
-    /// This is the Windows equivalent of `pwrite(2)`.
     async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        // Wrap in SendHandle before moving into spawn_blocking so the closure
-        // is `'static + Send`.  All other methods below follow the same pattern.
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
+        let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         let ptr = buf.as_ptr() as usize;
         let len = buf.len();
 
         tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
-            // Safety: `ptr`/`len` describe a slice owned by the caller that
             let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-
-            let mut overlapped = OVERLAPPED::default();
-
-            overlapped.Anonymous.Anonymous.Offset = offset as u32;
-            overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-
-            let mut bytes_written = 0u32;
-            unsafe {
-                WriteFile(
-                    handle.0,
-                    Some(slice),
-                    Some(&mut bytes_written),
-                    Some(&mut overlapped),
-                )
-                .map_err(FlashError::WindowsError)
-            }
+            fd.seek_write(slice, offset)
         })
         .await
         .map_err(|_| FlashError::SyncError)??;
@@ -150,29 +87,13 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 
     /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
+        let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         let ptr = buf.as_mut_ptr() as usize;
         let len = buf.len();
 
         let bytes_read = tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
             let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-
-            let mut overlapped = OVERLAPPED::default();
-            overlapped.Anonymous.Anonymous.Offset = offset as u32;
-            overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-
-            let mut bytes_read = 0u32;
-            unsafe {
-                ReadFile(
-                    handle.0,
-                    Some(slice),
-                    Some(&mut bytes_read),
-                    Some(&mut overlapped),
-                )
-                .map_err(FlashError::WindowsError)?;
-            }
-            Ok::<usize, FlashError>(bytes_read as usize)
+            fd.seek_read(slice, offset)
         })
         .await
         .map_err(|_| FlashError::SyncError)??;
@@ -200,20 +121,10 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
-        tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
-            let (method, dist) = match seek {
-                SeekFrom::Start(n) => (FILE_BEGIN, n as i64),
-                SeekFrom::Current(n) => (FILE_CURRENT, n),
-                SeekFrom::End(n) => (FILE_END, n),
-            };
-            unsafe {
-                SetFilePointerEx(handle.0, dist, None, method).map_err(FlashError::WindowsError)
-            }
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
+        let mut fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
+        tokio::task::spawn_blocking(move || fd.seek(seek))
+            .await
+            .map_err(|_| FlashError::SyncError)??;
         Ok(())
     }
 }
@@ -243,7 +154,7 @@ impl DeviceWriter for WindowsInterface {
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     None,
                     OPEN_EXISTING,
-                    FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
+                    FILE_ATTRIBUTE_NORMAL,
                     None,
                 )
                 .map_err(FlashError::WindowsError)?
