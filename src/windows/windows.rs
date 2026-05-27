@@ -563,3 +563,113 @@ fn process_single_volume(guid_path: &str, target_number: u32) {
 
     drop(write_guard); // explicit for clarity; would also drop at end of scope
 }
+/// Query the system for all mount points (drive letters or paths)
+/// associated with a specific physical drive number.
+/// for getting the letter name
+pub fn get_drive_letters_for_drive(device: BlockDevice) -> Vec<String> {
+    let mut letters = Vec::new();
+
+    // 1. Safely extract the drive number (e.g., 2 from "\\.\PhysicalDrive2")
+    let target_number = match physical_drive_number(&device.path) {
+        Ok(num) => num,
+        Err(_) => return letters, // Return empty if path can't be parsed
+    };
+    const VOLUME_GUID_BUF_LEN: usize = 64;
+    let mut vol_buf = vec![0u16; VOLUME_GUID_BUF_LEN];
+
+    // Reuse your custom VolumeFindHandle logic
+    let finder = match VolumeFindHandle::start(&mut vol_buf) {
+        Ok(f) => f,
+        Err(_) => return letters,
+    };
+
+    loop {
+        let guid_path = decode_wide_nul_string(&vol_buf);
+
+        if let Some(vol_letters) = get_single_volume_letters(&guid_path, target_number) {
+            letters.extend(vol_letters);
+        }
+
+        vol_buf.fill(0);
+        if !finder.advance(&mut vol_buf) {
+            break;
+        }
+    }
+
+    letters
+}
+
+/// Helper that checks if a volume belongs to the target drive, and collects its paths.
+fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<String>> {
+    let device_path = guid_path.trim_end_matches('\\');
+    let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
+
+    // Open handle with zero desired access to safely inspect the device number
+    let query_handle = unsafe {
+        CreateFileW(
+            PCWSTR(device_wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+        .ok()?
+    };
+    let query_guard = AutoCloseHandle(query_handle);
+
+    // If it doesn't match our drive, skip it
+    if storage_device_number(query_handle) != Some(target_number) {
+        return None;
+    }
+    drop(query_guard); // Close handle early before querying path names
+
+    // Two-pass approach to safely retrieve the mount points buffer
+    let guid_wide: Vec<u16> = guid_path.encode_utf16().chain(once(0)).collect();
+    let mut required_chars = 0u32;
+    let mut probe = [0u16; 1];
+    let _ = unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(guid_wide.as_ptr()),
+            Some(&mut probe),
+            &mut required_chars,
+        )
+    };
+
+    if required_chars == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut buf = vec![0u16; required_chars as usize];
+    if unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(guid_wide.as_ptr()),
+            Some(&mut buf),
+            &mut required_chars,
+        )
+    }
+    .is_err()
+    {
+        return Some(Vec::new());
+    }
+
+    // Parse the multi-string buffer into separate String elements
+    let mut vol_letters = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let term = buf[offset..].iter().position(|&c| c == 0).unwrap_or(0);
+        if term == 0 {
+            break; // Double-null terminator reached
+        }
+
+        let mount_point = &buf[offset..offset + term];
+        let path_str = String::from_utf16_lossy(mount_point);
+        if !path_str.is_empty() {
+            vol_letters.push(path_str);
+        }
+        offset += term + 1;
+    }
+
+    Some(vol_letters)
+}
