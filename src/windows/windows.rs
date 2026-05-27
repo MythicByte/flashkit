@@ -161,12 +161,6 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 impl DeviceWriter for WindowsInterface {
     type Handle = WindowsRawWriteHandle;
 
-    /// Open a physical drive for raw writing.
-    ///
-    /// After opening, we attempt `FSCTL_LOCK_VOLUME` in a retry loop (up to
-    /// 10 attempts × 500 ms) so that Windows releases any buffered filesystem
-    /// `WinDiskManagement::lockDrive`.  The lock is held for the lifetime of
-    /// the returned handle; closing the handle releases it automatically.
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
         let path = device.path.clone();
         let sector_size = device.sector_size;
@@ -258,7 +252,6 @@ impl DeviceEjector for WindowsInterface {
                 .map_err(FlashError::WindowsError)?
             };
 
-            let mut returned = 0u32;
             unsafe {
                 DeviceIoControl(
                     handle,
@@ -267,7 +260,7 @@ impl DeviceEjector for WindowsInterface {
                     0,
                     None,
                     0,
-                    Some(&mut returned),
+                    None,
                     None,
                 )
                 .ok();
@@ -279,8 +272,6 @@ impl DeviceEjector for WindowsInterface {
         .map_err(|e| FlashError::FilesystemError(e.to_string()))?
     }
 }
-
-// ── DeviceUnmounter ───────────────────────────────────────────────────────────
 
 impl DeviceUnmounter for WindowsInterface {
     /// Dismount every volume on the target physical drive.
