@@ -15,10 +15,7 @@ use std::{
     mem::size_of,
     os::windows::{
         fs::FileExt,
-        io::{
-            AsRawHandle,
-            FromRawHandle,
-        },
+        io::FromRawHandle,
     },
     path::{
         Path,
@@ -43,7 +40,6 @@ use windows::{
             FindFirstVolumeW,
             FindNextVolumeW,
             FindVolumeClose,
-            FlushFileBuffers,
             GetVolumePathNamesForVolumeNameW,
             OPEN_EXISTING,
         },
@@ -137,16 +133,6 @@ struct Win32DiskDrive {
     media_type: Option<String>, // "Removable Media" / "Fixed hard disk media"
 }
 
-/// Wraps [`HANDLE`] to make it [`Send`].
-///
-/// Windows HANDLEs for file/device objects are process-wide values that the
-/// Win32 documentation explicitly permits to be used from any thread.
-/// Safety is maintained by the `&mut self` receivers on [`RawWriteHandle`]:
-/// at most one task can hold the handle at a time, so there is no concurrent
-/// use across threads.
-struct SendHandle(HANDLE);
-unsafe impl Send for SendHandle {}
-
 #[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub struct WindowsInterface;
@@ -178,14 +164,8 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     /// Flush kernel write buffers to physical media via `FlushFileBuffers`.
-    async fn flush_to_disk(&mut self) -> FlashResult<()> {
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
-        tokio::task::spawn_blocking(move || unsafe {
-            let handle = send_handle;
-            FlushFileBuffers(handle.0).map_err(FlashError::WindowsError)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
+    fn flush_to_disk(&mut self) -> FlashResult<()> {
+        self.file.sync_all()?;
         Ok(())
     }
 

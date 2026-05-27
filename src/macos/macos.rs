@@ -65,7 +65,7 @@ impl RawWriteHandle for DarwinRawWriteHandle {
         Ok(bytes_read)
     }
 
-    async fn flush_to_disk(&mut self) -> FlashResult<()> {
+    fn flush_to_disk(&mut self) -> FlashResult<()> {
         self.file.sync_all()?;
         Ok(())
     }

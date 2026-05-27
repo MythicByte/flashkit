@@ -44,7 +44,7 @@ pub trait RawWriteHandle {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize>;
 
     /// Flush kernel buffers → physical media. Must be called before Done.
-    async fn flush_to_disk(&mut self) -> FlashResult<()>;
+    fn flush_to_disk(&mut self) -> FlashResult<()>;
 
     /// Sector size for this device. Writes must be multiples on Windows.
     fn sector_size(&self) -> usize;
