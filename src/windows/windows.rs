@@ -172,6 +172,9 @@ impl DeviceWriter for WindowsInterface {
                 )
                 .map_err(FlashError::WindowsError)?
             };
+            if handle.is_invalid() {
+                return Err(FlashError::SyncError);
+            }
             let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
             Ok(WindowsRawWriteHandle {
                 file,
@@ -242,6 +245,9 @@ impl DeviceEjector for WindowsInterface {
                 .map_err(FlashError::WindowsError)?
             };
 
+            if handle.is_invalid() {
+                return Err(FlashError::SyncError);
+            }
             unsafe {
                 DeviceIoControl(
                     handle,
@@ -292,6 +298,9 @@ fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
             .map_err(|_| FlashError::FilesystemError("FindFirstVolumeW failed".into()))?
     };
 
+    if find.is_invalid() {
+        return Err(FlashError::SyncError);
+    }
     loop {
         let end = vol_buf
             .iter()
