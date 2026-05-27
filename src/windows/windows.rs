@@ -12,7 +12,6 @@ use std::{
     },
     path::{Path, PathBuf},
 };
-use tracing::info;
 use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE},
@@ -73,14 +72,12 @@ pub struct WindowsRawWriteHandle {
 
 impl RawWriteHandle for WindowsRawWriteHandle {
     async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        info!("Funcion started write");
         let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         let ptr = buf.as_ptr() as usize;
         let len = buf.len();
 
         tokio::task::spawn_blocking(move || {
             let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-            info!("File write: {}", slice.len());
             fd.seek_write(slice, offset)
         })
         .await
@@ -90,7 +87,6 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 
     /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        info!("Funcion started read");
         let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         let ptr = buf.as_mut_ptr() as usize;
         let len = buf.len();
@@ -106,7 +102,6 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 
     /// Flush kernel write buffers to physical media via `FlushFileBuffers`.
     async fn flush_to_disk(&mut self) -> FlashResult<()> {
-        info!("Funcion started flush");
         let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
         tokio::task::spawn_blocking(move || unsafe {
             let handle = send_handle;
@@ -126,7 +121,6 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        info!("Funcion started seek");
         let mut fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         tokio::task::spawn_blocking(move || fd.seek(seek))
             .await
@@ -145,7 +139,6 @@ impl DeviceWriter for WindowsInterface {
     /// `WinDiskManagement::lockDrive`.  The lock is held for the lifetime of
     /// the returned handle; closing the handle releases it automatically.
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
-        info!("Funcion started open for writing");
         let path = device.path.clone();
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
@@ -180,7 +173,6 @@ impl DeviceWriter for WindowsInterface {
 
 impl DeviceEnumerator for WindowsInterface {
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
-        info!("Funcion started list_devices");
         tokio::task::spawn_blocking(|| {
             let wmi = WMIConnection::new()
                 .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
@@ -218,7 +210,6 @@ impl DeviceEnumerator for WindowsInterface {
 
 impl DeviceEjector for WindowsInterface {
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
-        info!("Funcion started eject");
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || -> FlashResult<()> {
             unmount_volumes_on_drive(&path)?;
@@ -272,7 +263,6 @@ impl DeviceUnmounter for WindowsInterface {
     ///  3. For matching volumes: remove mount-point paths with
     ///     `DeleteVolumeMountPointW`, then issue `FSCTL_DISMOUNT_VOLUME`.
     async fn unmount(&self, device: &BlockDevice) -> FlashResult<()> {
-        info!("Funcion started unmount");
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || unmount_volumes_on_drive(&path))
             .await
