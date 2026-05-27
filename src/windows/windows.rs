@@ -383,11 +383,23 @@ fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
 /// Parse the drive number from a path like `\\.\PhysicalDrive2` → `2`.
 fn physical_drive_number(path: &Path) -> FlashResult<u32> {
     let s = path.to_string_lossy();
-    s.to_ascii_uppercase()
-        .rsplit("PHYSICALDRIVE")
-        .next()
-        .and_then(|n| n.trim().parse().ok())
-        .ok_or_else(|| FlashError::FilesystemError(format!("cannot parse drive number from '{s}'")))
+    let upper = s.to_ascii_uppercase();
+
+    // Require the path to match exactly \\.\PHYSICALDRIVEn
+    let prefix = r"\\.\PHYSICALDRIVE";
+    let suffix = upper.strip_prefix(prefix).ok_or_else(|| {
+        FlashError::FilesystemError(format!("path does not look like a physical drive: '{s}'"))
+    })?;
+
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return Err(FlashError::FilesystemError(format!(
+            "invalid drive number in path: '{s}'"
+        )));
+    }
+
+    suffix
+        .parse()
+        .map_err(|_| FlashError::FilesystemError(format!("cannot parse drive number from '{s}'")))
 }
 
 /// Return the physical device number for `handle` via
