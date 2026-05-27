@@ -52,7 +52,7 @@ pub trait RawWriteHandle {
     /// Total writable size in bytes.
     fn size_bytes(&self) -> FlashResult<u64>;
     /// set the file to seek
-    async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()>;
+    fn seek(&mut self, seek: SeekFrom) -> FlashResult<()>;
 }
 /// Open a raw writable handle to a block device.
 /// Abstracted because Windows requires different open flags,

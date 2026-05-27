@@ -169,9 +169,7 @@ where
             .send(FlashProgress::create(FlashPhase::Flushing))
             .map_err(|_| FlashError::SendChannelError)?;
         handle_target_write_to.flush_to_disk().await?;
-        handle_target_write_to
-            .seek(std::io::SeekFrom::Start(0))
-            .await?;
+        handle_target_write_to.seek(std::io::SeekFrom::Start(0))?;
         on_progress
             .send(FlashProgress::create(FlashPhase::Verifying))
             .map_err(|_| FlashError::SendChannelError)?;
@@ -276,8 +274,7 @@ where
         handle.write_at(end_offset, &buffer_slice)?;
 
         handle.flush_to_disk().await?;
-        handle.seek(std::io::SeekFrom::Start(0)).await?;
-        // tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        handle.seek(std::io::SeekFrom::Start(0))?;
 
         Ok(())
     }

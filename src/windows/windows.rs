@@ -142,11 +142,8 @@ impl RawWriteHandle for WindowsRawWriteHandle {
         Ok(self.size_bytes)
     }
 
-    async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        let mut fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
-        tokio::task::spawn_blocking(move || fd.seek(seek))
-            .await
-            .map_err(|_| FlashError::SyncError)??;
+    fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
+        self.file.seek(seek).map_err(|_| FlashError::SyncError)?;
         Ok(())
     }
 }

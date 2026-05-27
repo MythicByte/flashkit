@@ -304,7 +304,7 @@ impl RawWriteHandle for LinuxRawWriteHandle {
         Ok(self.size_bytes)
     }
 
-    async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
+    fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
         self.file.seek(seek).map_err(FlashError::Io)?;
         Ok(())
     }
