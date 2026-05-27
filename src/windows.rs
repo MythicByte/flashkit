@@ -1,1 +1,2 @@
-pub(crate) mod windows;
+/// Windows
+pub mod windows;

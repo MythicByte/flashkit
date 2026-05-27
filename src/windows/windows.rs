@@ -5,31 +5,25 @@ use crate::{
         FlashResult,
     },
 };
+use serde::Deserialize;
 use std::{
-    io::SeekFrom,
+    io::{
+        Seek,
+        SeekFrom,
+    },
+    iter::once,
     mem::size_of,
-    os::windows::io::{
-        AsRawHandle,
-        FromRawHandle,
+    os::windows::{
+        fs::FileExt,
+        io::FromRawHandle,
     },
     path::{
         Path,
         PathBuf,
     },
-    thread,
-    time::Duration,
 };
 use windows::{
     Win32::{
-        Devices::DeviceAndDriverInstallation::{
-            DIGCF_PRESENT,
-            SP_DEVINFO_DATA,
-            SPDRP_FRIENDLYNAME,
-            SetupDiDestroyDeviceInfoList,
-            SetupDiEnumDeviceInfo,
-            SetupDiGetClassDevsW,
-            SetupDiGetDeviceRegistryPropertyW,
-        },
         Foundation::{
             CloseHandle,
             HANDLE,
@@ -37,9 +31,7 @@ use windows::{
         Storage::FileSystem::{
             CreateFileW,
             DeleteVolumeMountPointW,
-            FILE_BEGIN,
-            FILE_CURRENT,
-            FILE_END,
+            FILE_ATTRIBUTE_NORMAL,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
@@ -48,38 +40,24 @@ use windows::{
             FindFirstVolumeW,
             FindNextVolumeW,
             FindVolumeClose,
-            FlushFileBuffers,
             GetVolumePathNamesForVolumeNameW,
             OPEN_EXISTING,
-            ReadFile,
-            SetFilePointerEx,
-            WriteFile,
         },
         System::{
-            IO::{
-                DeviceIoControl,
-                OVERLAPPED,
-            },
+            IO::DeviceIoControl,
             Ioctl::{
-                DISK_GEOMETRY_EX,
                 FSCTL_DISMOUNT_VOLUME,
-                FSCTL_LOCK_VOLUME,
-                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
-                IOCTL_STORAGE_QUERY_PROPERTY,
-                PropertyStandardQuery,
-                STORAGE_DEVICE_DESCRIPTOR,
                 STORAGE_DEVICE_NUMBER,
-                STORAGE_PROPERTY_QUERY,
-                StorageDeviceProperty,
             },
         },
     },
-    core::{
-        GUID,
-        PCWSTR,
-    },
+    core::PCWSTR,
+};
+use wmi::{
+    WMIConnection,
+    WMIError,
 };
 
 use crate::traits::{
@@ -90,18 +68,73 @@ use crate::traits::{
     RawWriteHandle,
 };
 
-/// Wraps [`HANDLE`] to make it [`Send`].
+/// Closes any file or device HANDLE on drop.
+struct AutoCloseHandle(HANDLE);
+
+impl Drop for AutoCloseHandle {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                CloseHandle(self.0).ok();
+            }
+        }
+    }
+}
+
+/// Owns a `FindFirstVolumeW` enumeration cursor and closes it on drop.
 ///
-/// Windows HANDLEs for file/device objects are process-wide values that the
-/// Win32 documentation explicitly permits to be used from any thread.
-/// Safety is maintained by the `&mut self` receivers on [`RawWriteHandle`]:
-/// at most one task can hold the handle at a time, so there is no concurrent
-/// use across threads.
-struct SendHandle(HANDLE);
-unsafe impl Send for SendHandle {}
+/// The raw HANDLE is kept private; all access goes through the typed methods
+/// below.  This prevents the Copy-able raw value from "escaping" and being
+/// used independently of its owner.
+struct VolumeFindHandle(HANDLE);
+
+impl VolumeFindHandle {
+    /// Begin volume enumeration.  Writes the first volume's GUID path into
+    /// `buf` and returns the guard that owns the cursor.
+    ///
+    /// A volume GUID path looks like `\\?\Volume{xxxxxxxx-...}\` — a stable,
+    /// letter-independent name for a volume that does not change even if the
+    /// drive letter is reassigned.
+    fn start(buf: &mut [u16]) -> FlashResult<Self> {
+        let handle = unsafe {
+            FindFirstVolumeW(buf)
+                .map_err(|_| FlashError::FilesystemError("FindFirstVolumeW failed".into()))?
+        };
+        // INVALID_HANDLE_VALUE here would mean the system has no volumes at
+        // all — not possible in practice, but we guard against it anyway.
+        if handle.is_invalid() {
+            return Err(FlashError::SyncError);
+        }
+        Ok(Self(handle))
+    }
+
+    /// Advance the cursor and write the next GUID path into `buf`.
+    /// Returns `true` while more volumes remain, `false` when the list is
+    /// exhausted (Windows signals ERROR_NO_MORE_FILES).
+    fn advance(&self, buf: &mut [u16]) -> bool {
+        unsafe { FindNextVolumeW(self.0, buf) }.is_ok()
+    }
+}
+
+impl Drop for VolumeFindHandle {
+    fn drop(&mut self) {
+        unsafe { FindVolumeClose(self.0).ok() };
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename = "Win32_DiskDrive")]
+#[serde(rename_all = "PascalCase")]
+struct Win32DiskDrive {
+    #[serde(rename = "DeviceID")]
+    device_id: String, // "\\.\PhysicalDrive0"
+    model: String, // "Samsung USB Drive"
+    size: Option<u64>,
+    bytes_per_sector: u32,
+    media_type: Option<String>, // "Removable Media" / "Fixed hard disk media"
+}
 
 #[allow(missing_docs)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WindowsInterface;
 
 #[allow(missing_docs)]
@@ -113,85 +146,26 @@ pub struct WindowsRawWriteHandle {
 }
 
 impl RawWriteHandle for WindowsRawWriteHandle {
-    /// Positional write via `WriteFile` + `OVERLAPPED`.
-    ///
-    /// Even on handles NOT opened with `FILE_FLAG_OVERLAPPED`, Windows
-    /// honours the `Offset`/`OffsetHigh` fields of an `OVERLAPPED` struct
-    /// to select the write position, completing the call synchronously.
-    /// This is the Windows equivalent of `pwrite(2)`.
-    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        // Wrap in SendHandle before moving into spawn_blocking so the closure
-        // is `'static + Send`.  All other methods below follow the same pattern.
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
-        let ptr = buf.as_ptr() as usize;
-        let len = buf.len();
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
+        self.file
+            .seek_write(buf, offset)
+            .map_err(|_| FlashError::SyncError)?;
 
-        tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
-            // Safety: `ptr`/`len` describe a slice owned by the caller that
-            let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-
-            let mut overlapped = OVERLAPPED::default();
-
-            overlapped.Anonymous.Anonymous.Offset = offset as u32;
-            overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-
-            let mut bytes_written = 0u32;
-            unsafe {
-                WriteFile(
-                    handle.0,
-                    Some(slice),
-                    Some(&mut bytes_written),
-                    Some(&mut overlapped),
-                )
-                .map_err(FlashError::WindowsError)
-            }
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
         Ok(())
     }
 
     /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
-    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
-        let ptr = buf.as_mut_ptr() as usize;
-        let len = buf.len();
-
-        let bytes_read = tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
-            let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-
-            let mut overlapped = OVERLAPPED::default();
-            overlapped.Anonymous.Anonymous.Offset = offset as u32;
-            overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-
-            let mut bytes_read = 0u32;
-            unsafe {
-                ReadFile(
-                    handle.0,
-                    Some(slice),
-                    Some(&mut bytes_read),
-                    Some(&mut overlapped),
-                )
-                .map_err(FlashError::WindowsError)?;
-            }
-            Ok::<usize, FlashError>(bytes_read as usize)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
+        let bytes_read = self
+            .file
+            .seek_read(buf, offset)
+            .map_err(|_| FlashError::SyncError)?;
         Ok(bytes_read)
     }
 
     /// Flush kernel write buffers to physical media via `FlushFileBuffers`.
-    async fn flush_to_disk(&mut self) -> FlashResult<()> {
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
-        tokio::task::spawn_blocking(move || unsafe {
-            let handle = send_handle;
-            FlushFileBuffers(handle.0).map_err(FlashError::WindowsError)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
+    fn flush_to_disk(&mut self) -> FlashResult<()> {
+        self.file.sync_all()?;
         Ok(())
     }
 
@@ -203,21 +177,8 @@ impl RawWriteHandle for WindowsRawWriteHandle {
         Ok(self.size_bytes)
     }
 
-    async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        let send_handle = SendHandle(HANDLE(self.file.as_raw_handle()));
-        tokio::task::spawn_blocking(move || {
-            let handle = send_handle;
-            let (method, dist) = match seek {
-                SeekFrom::Start(n) => (FILE_BEGIN, n as i64),
-                SeekFrom::Current(n) => (FILE_CURRENT, n),
-                SeekFrom::End(n) => (FILE_END, n),
-            };
-            unsafe {
-                SetFilePointerEx(handle.0, dist, None, method).map_err(FlashError::WindowsError)
-            }
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
+    fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
+        self.file.seek(seek).map_err(|_| FlashError::SyncError)?;
         Ok(())
     }
 }
@@ -225,12 +186,6 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 impl DeviceWriter for WindowsInterface {
     type Handle = WindowsRawWriteHandle;
 
-    /// Open a physical drive for raw writing.
-    ///
-    /// After opening, we attempt `FSCTL_LOCK_VOLUME` in a retry loop (up to
-    /// 10 attempts × 500 ms) so that Windows releases any buffered filesystem
-    /// `WinDiskManagement::lockDrive`.  The lock is held for the lifetime of
-    /// the returned handle; closing the handle releases it automatically.
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
         let path = device.path.clone();
         let sector_size = device.sector_size;
@@ -247,45 +202,15 @@ impl DeviceWriter for WindowsInterface {
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     None,
                     OPEN_EXISTING,
-                    FILE_FLAGS_AND_ATTRIBUTES(0),
+                    FILE_ATTRIBUTE_NORMAL,
                     None,
                 )
                 .map_err(FlashError::WindowsError)?
             };
-
-            // Retry FSCTL_LOCK_VOLUME so transient filesystem activity
-            // (e.g. Explorer thumbnailing) doesn't cause an immediate failure.
-            let mut locked = false;
-            for _ in 0..10 {
-                let mut returned = 0u32;
-                if unsafe {
-                    DeviceIoControl(
-                        handle,
-                        FSCTL_LOCK_VOLUME,
-                        None,
-                        0,
-                        None,
-                        0,
-                        Some(&mut returned),
-                        None,
-                    )
-                }
-                .is_ok()
-                {
-                    locked = true;
-                    break;
-                }
-                thread::sleep(Duration::from_millis(500));
+            if handle.is_invalid() {
+                return Err(FlashError::SyncError);
             }
-
-            if !locked {
-                unsafe { CloseHandle(handle).ok() };
-                return Err(FlashError::DeviceBusy { path });
-            }
-
-            // Transfer ownership to std::fs::File.  Its Drop impl calls
-            // CloseHandle, which also releases the FSCTL_LOCK_VOLUME lock.
-            let file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+            let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
             Ok(WindowsRawWriteHandle {
                 file,
                 sector_size,
@@ -300,72 +225,37 @@ impl DeviceWriter for WindowsInterface {
 impl DeviceEnumerator for WindowsInterface {
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
         tokio::task::spawn_blocking(|| {
-            let mut devices = Vec::new();
+            let wmi = WMIConnection::new()
+                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
 
-            for device_number in 0u32..16 {
-                let path_str = format!(r"\\.\PhysicalDrive{}", device_number);
-                let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+            let drives: Vec<Win32DiskDrive> = wmi
+                .query()
+                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
 
-                let handle = unsafe {
-                    CreateFileW(
-                        PCWSTR(wide.as_ptr()),
-                        0, // zero access — enough to issue IOCTLs
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        None,
-                        OPEN_EXISTING,
-                        FILE_FLAGS_AND_ATTRIBUTES(0),
-                        None,
+            let devices = drives
+                .into_iter()
+                .map(|d| {
+                    let size_bytes = d.size.unwrap_or(0);
+                    let is_removable = d
+                        .media_type
+                        .as_deref()
+                        .map(|m| m.contains("Removable"))
+                        .unwrap_or(false);
+
+                    BlockDevice::new(
+                        PathBuf::from(&d.device_id),
+                        d.model,
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
                     )
-                };
-
-                let handle = match handle {
-                    Ok(h) if h.is_invalid() => h,
-                    _ => continue,
-                };
-
-                let mut geo = DISK_GEOMETRY_EX::default();
-                let mut returned = 0u32;
-
-                let geo_ok = unsafe {
-                    DeviceIoControl(
-                        handle,
-                        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-                        None,
-                        0,
-                        Some(&mut geo as *mut _ as *mut _),
-                        size_of::<DISK_GEOMETRY_EX>() as u32,
-                        Some(&mut returned),
-                        None,
-                    )
-                };
-
-                unsafe { CloseHandle(handle).ok() };
-
-                if geo_ok.is_err() {
-                    continue;
-                }
-
-                let size_bytes = geo.DiskSize as u64;
-                let sector_size = geo.Geometry.BytesPerSector as usize;
-                let is_removable = query_removable(&path_str).unwrap_or(false);
-                let name = get_friendly_name(device_number)
-                    .unwrap_or_else(|| format!("Physical Drive {}", device_number));
-
-                devices.push(BlockDevice::new(
-                    PathBuf::from(&path_str),
-                    name,
-                    size_bytes,
-                    is_removable,
-                    sector_size,
-                ));
-            }
+                })
+                .collect();
 
             Ok(devices)
         })
         .await
-        .map_err(|_| FlashError::DeviceBusy {
-            path: PathBuf::new(),
-        })?
+        .map_err(|_| FlashError::SyncError)?
     }
 }
 
@@ -373,6 +263,7 @@ impl DeviceEjector for WindowsInterface {
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || -> FlashResult<()> {
+            unmount_volumes_on_drive(&path)?;
             let path_str = path.to_string_lossy().to_string();
             let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -389,7 +280,9 @@ impl DeviceEjector for WindowsInterface {
                 .map_err(FlashError::WindowsError)?
             };
 
-            let mut returned = 0u32;
+            if handle.is_invalid() {
+                return Err(FlashError::SyncError);
+            }
             unsafe {
                 DeviceIoControl(
                     handle,
@@ -398,7 +291,7 @@ impl DeviceEjector for WindowsInterface {
                     0,
                     None,
                     0,
-                    Some(&mut returned),
+                    None,
                     None,
                 )
                 .ok();
@@ -410,8 +303,6 @@ impl DeviceEjector for WindowsInterface {
         .map_err(|e| FlashError::FilesystemError(e.to_string()))?
     }
 }
-
-// ── DeviceUnmounter ───────────────────────────────────────────────────────────
 
 impl DeviceUnmounter for WindowsInterface {
     /// Dismount every volume on the target physical drive.
@@ -431,102 +322,53 @@ impl DeviceUnmounter for WindowsInterface {
 }
 
 fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
+    const VOLUME_GUID_BUF_LEN: usize = 64;
+    let mut vol_buf = vec![0u16; VOLUME_GUID_BUF_LEN];
+
     let target_number = physical_drive_number(physical_path)?;
 
-    let mut vol_buf = vec![0u16; 260];
-
-    // FindFirstVolumeW fills vol_buf with the GUID path of the first volume,
-    // e.g. "\\?\Volume{...}\".
-    let find = unsafe {
-        FindFirstVolumeW(&mut vol_buf)
-            .map_err(|_| FlashError::FilesystemError("FindFirstVolumeW failed".into()))?
-    };
+    // Start enumeration.  The guard calls `FindVolumeClose` when it drops,
+    // regardless of how this function exits.
+    let finder = VolumeFindHandle::start(&mut vol_buf)?;
 
     loop {
-        let end = vol_buf
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(vol_buf.len());
-        let possible_string = &vol_buf.get(..end).ok_or(FlashError::OutOfBoundsArray)?;
-        let guid_path = String::from_utf16_lossy(possible_string);
+        let guid_path = decode_wide_nul_string(&vol_buf);
 
-        // Strip the trailing '\' to form a device path accepted by CreateFileW.
-        let device_path = guid_path.trim_end_matches('\\');
-        let device_wide: Vec<u16> = device_path
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        // Per-volume errors are absorbed here.  A locked or inaccessible
+        // volume should not abort the whole unmount operation.
+        process_single_volume(&guid_path, target_number);
 
-        // Open with zero-access just to query the device number.
-        if let Ok(vh) = unsafe {
-            CreateFileW(
-                PCWSTR(device_wide.as_ptr()),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                None,
-            )
-        } {
-            let matches = storage_device_number(vh)
-                .map(|n| n == target_number)
-                .unwrap_or(false);
-            unsafe { CloseHandle(vh).ok() };
-
-            if matches {
-                // Remove all mount points (drive letters / directory links).
-                remove_mount_points(&guid_path);
-
-                // Re-open with write access to issue FSCTL_DISMOUNT_VOLUME.
-                if let Ok(wh) = unsafe {
-                    CreateFileW(
-                        PCWSTR(device_wide.as_ptr()),
-                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        None,
-                        OPEN_EXISTING,
-                        FILE_FLAGS_AND_ATTRIBUTES(0),
-                        None,
-                    )
-                } {
-                    let mut returned = 0u32;
-                    unsafe {
-                        DeviceIoControl(
-                            wh,
-                            FSCTL_DISMOUNT_VOLUME,
-                            None,
-                            0,
-                            None,
-                            0,
-                            Some(&mut returned),
-                            None,
-                        )
-                        .ok();
-                        CloseHandle(wh).ok();
-                    }
-                }
-            }
-        }
-
-        // Advance; break when the enumeration is exhausted (ERROR_NO_MORE_FILES).
+        // Advance the cursor.  When there are no more volumes,
+        // `FindNextVolumeW` signals ERROR_NO_MORE_FILES and we stop.
         vol_buf.fill(0);
-        if unsafe { FindNextVolumeW(find, &mut vol_buf) }.is_err() {
+        if !finder.advance(&mut vol_buf) {
             break;
         }
     }
 
-    unsafe { FindVolumeClose(find).ok() };
     Ok(())
 }
 
 /// Parse the drive number from a path like `\\.\PhysicalDrive2` → `2`.
 fn physical_drive_number(path: &Path) -> FlashResult<u32> {
     let s = path.to_string_lossy();
-    s.rsplit("PhysicalDrive")
-        .next()
-        .and_then(|n| n.trim().parse().ok())
-        .ok_or_else(|| FlashError::FilesystemError(format!("cannot parse drive number from '{s}'")))
+    let upper = s.to_ascii_uppercase();
+
+    // Require the path to match exactly \\.\PHYSICALDRIVEn
+    let prefix = r"\\.\PHYSICALDRIVE";
+    let suffix = upper.strip_prefix(prefix).ok_or_else(|| {
+        FlashError::FilesystemError(format!("path does not look like a physical drive: '{s}'"))
+    })?;
+
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return Err(FlashError::FilesystemError(format!(
+            "invalid drive number in path: '{s}'"
+        )));
+    }
+
+    suffix
+        .parse()
+        .map_err(|_| FlashError::FilesystemError(format!("cannot parse drive number from '{s}'")))
 }
 
 /// Return the physical device number for `handle` via
@@ -550,48 +392,222 @@ fn storage_device_number(handle: HANDLE) -> Option<u32> {
     Some(sdn.DeviceNumber)
 }
 
-/// Remove every mount-point path (drive letter or directory junction)
-/// associated with the volume whose GUID path is `guid_path`.
-///
-/// `guid_path` must end with `\`, as returned by `FindFirstVolumeW`.
-fn remove_mount_points(guid_path: &str) {
-    let guid_wide: Vec<u16> = guid_path.encode_utf16().chain(std::iter::once(0)).collect();
-    // Allocate generously — `GetVolumePathNamesForVolumeNameW` may fail and
-    // retry with a larger buffer, but 1 KiB covers typical cases.
-    let mut buf = vec![0u16; 1024];
-    let mut len = 0u32;
+// `GetVolumePathNamesForVolumeNameW` returns all of a volume's mount points
+// as a "multi-string": consecutive null-terminated UTF-16 strings packed into
+// one buffer, ending with an extra null:
+//
+//   C:\<NUL>D:\Data\<NUL><NUL>
+//
+// The safe approach is the two-pass pattern:
+//   Pass 1 — call with a 1-element probe buffer.  The call fails but Windows
+//             sets `required_chars` to the number of UTF-16 code units needed.
+//   Pass 2 — allocate exactly that many code units and call again.
+//
+// A fixed-size buffer (as the original used) silently fails when a drive has
+// many or long mount points, leaving them attached and causing the later
+// FSCTL_DISMOUNT_VOLUME to produce incomplete results.
 
+fn remove_mount_points(guid_path: &str) {
+    let guid_wide: Vec<u16> = guid_path.encode_utf16().chain(once(0)).collect();
+
+    let mut required_chars = 0u32;
+    let mut probe = [0u16; 1];
+    let _ = unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(guid_wide.as_ptr()),
+            Some(&mut probe),
+            &mut required_chars,
+        )
+    };
+
+    if required_chars == 0 {
+        return; // no mount points, or volume not accessible
+    }
+
+    let mut buf = vec![0u16; required_chars as usize];
     if unsafe {
-        GetVolumePathNamesForVolumeNameW(PCWSTR(guid_wide.as_ptr()), Some(&mut buf), &mut len)
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(guid_wide.as_ptr()),
+            Some(&mut buf),
+            &mut required_chars,
+        )
     }
     .is_err()
     {
+        // Should not happen after a correctly-sized allocation, but we stop
+        // rather than walk uninitialised memory.
         return;
     }
 
-    // The buffer is a multi-string: null-terminated strings back-to-back,
-    // terminated by an extra null ("C:\\\0D:\\\0\0").
+    // Walk the multi-string and delete each mount point
+    //
+    //   C:\<NUL>D:\Data\<NUL><NUL>
+    //   ^-------^              ^^
+    //   first entry       double-null = end of list
     let mut offset = 0usize;
-    while offset < buf.len() {
+    loop {
         let term = buf[offset..].iter().position(|&c| c == 0).unwrap_or(0);
         if term == 0 {
-            break; // double-null end marker
+            break; // double-null: no more entries
         }
-        // Build a slice that includes the null terminator for PCWSTR.
-        let mp = &buf[offset..offset + term + 1];
+        // Include the null terminator — PCWSTR is a C-style null-terminated pointer.
+        let mount_point = &buf[offset..offset + term + 1];
         unsafe {
-            DeleteVolumeMountPointW(PCWSTR(mp.as_ptr())).ok();
+            DeleteVolumeMountPointW(PCWSTR(mount_point.as_ptr())).ok();
         }
         offset += term + 1;
     }
 }
+/// Decode a null-terminated UTF-16 string from a buffer.
+///
+/// `position` returns an index guaranteed to be ≤ `buf.len()`, so the slice
+/// is always in-bounds — no fallible `get` or `?` needed.
+fn decode_wide_nul_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+// Separating this from the enumeration loop keeps two concerns distinct:
+//   - The loop in `unmount_volumes_on_drive` is only about *iteration*.
+//   - This function is only about *what to do with one volume*.
+//
+// All handle management here uses `AutoCloseHandle` so every CreateFileW
+// handle is closed exactly once, automatically, with no manual CloseHandle
+// calls needed.
 
-fn query_removable(path: &str) -> Option<bool> {
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+/// If `guid_path` belongs to the drive numbered `target_number`, remove all
+/// its mount points and dismount its filesystem.  Errors are absorbed: an
+/// inaccessible or already-unmounted volume is silently skipped.
+fn process_single_volume(guid_path: &str, target_number: u32) {
+    // CreateFileW requires the path without the trailing backslash.
+    let device_path = guid_path.trim_end_matches('\\');
+    let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
 
-    let handle = unsafe {
+    // ── open with zero desired-access and check which physical drive
+    //            this volume lives on.
+    //
+    // Zero desired-access is enough to send an IOCTL.  Think of an IOCTL as a
+    // typed question sent to a device driver: here we ask
+    // "what physical drive number are you on?"
+    let Ok(query_handle) = (unsafe {
         CreateFileW(
-            PCWSTR(wide.as_ptr()),
+            PCWSTR(device_wide.as_ptr()),
+            0, // zero desired-access: query-only, no read or write
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }) else {
+        return; // volume not accessible (already removed, etc.); skip it
+    };
+
+    // The guard closes `query_handle` when it leaves scope.
+    let query_guard = AutoCloseHandle(query_handle);
+
+    let is_match = storage_device_number(query_handle) == Some(target_number);
+
+    // Done querying; release the handle early.
+    drop(query_guard);
+
+    if !is_match {
+        return;
+    }
+
+    // ──  detach all drive letters and directory junctions.
+    //
+    // A "mount point" is any name through which users reach this volume —
+    // the most common form is a drive letter like `D:\`, but Windows also
+    // supports mounting volumes at arbitrary directory paths.
+    remove_mount_points(guid_path);
+
+    // ── Step 3: open with write access and flush/lock the filesystem.
+    //
+    // FSCTL_DISMOUNT_VOLUME tells the filesystem driver to write any
+    // pending data to disk and mark itself as cleanly unmounted.  After
+    // this call the volume still exists in the OS's internal table, but
+    // its filesystem is no longer active — exactly what we need before
+    // writing a raw disk image over the underlying device.
+    let Ok(write_handle) = (unsafe {
+        CreateFileW(
+            PCWSTR(device_wide.as_ptr()),
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }) else {
+        return;
+    };
+
+    // write_guard (no underscore) signals: this binding is intentionally kept
+    // alive to close write_handle at end of scope — it is not an unused value.
+    let write_guard = AutoCloseHandle(write_handle);
+
+    let mut bytes_returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            write_handle,
+            FSCTL_DISMOUNT_VOLUME,
+            None,
+            0,
+            None,
+            0,
+            Some(&mut bytes_returned),
+            None,
+        )
+        .ok(); // best-effort: already-gone volumes are fine
+    }
+
+    drop(write_guard); // explicit for clarity; would also drop at end of scope
+}
+/// Query the system for all mount points (drive letters or paths)
+/// associated with a specific physical drive number.
+/// for getting the letter name
+pub fn get_drive_letters_for_drive(device: BlockDevice) -> Vec<String> {
+    let mut letters = Vec::new();
+
+    // 1. Safely extract the drive number (e.g., 2 from "\\.\PhysicalDrive2")
+    let target_number = match physical_drive_number(&device.path) {
+        Ok(num) => num,
+        Err(_) => return letters, // Return empty if path can't be parsed
+    };
+    const VOLUME_GUID_BUF_LEN: usize = 64;
+    let mut vol_buf = vec![0u16; VOLUME_GUID_BUF_LEN];
+
+    // Reuse your custom VolumeFindHandle logic
+    let finder = match VolumeFindHandle::start(&mut vol_buf) {
+        Ok(f) => f,
+        Err(_) => return letters,
+    };
+
+    loop {
+        let guid_path = decode_wide_nul_string(&vol_buf);
+
+        if let Some(vol_letters) = get_single_volume_letters(&guid_path, target_number) {
+            letters.extend(vol_letters);
+        }
+
+        vol_buf.fill(0);
+        if !finder.advance(&mut vol_buf) {
+            break;
+        }
+    }
+
+    letters
+}
+
+/// Helper that checks if a volume belongs to the target drive, and collects its paths.
+fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<String>> {
+    let device_path = guid_path.trim_end_matches('\\');
+    let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
+
+    // Open handle with zero desired access to safely inspect the device number
+    let query_handle = unsafe {
+        CreateFileW(
+            PCWSTR(device_wide.as_ptr()),
             0,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
@@ -601,93 +617,59 @@ fn query_removable(path: &str) -> Option<bool> {
         )
         .ok()?
     };
+    let query_guard = AutoCloseHandle(query_handle);
 
-    let query = STORAGE_PROPERTY_QUERY {
-        PropertyId: StorageDeviceProperty,
-        QueryType: PropertyStandardQuery,
-        AdditionalParameters: [0],
-    };
+    // If it doesn't match our drive, skip it
+    if storage_device_number(query_handle) != Some(target_number) {
+        return None;
+    }
+    drop(query_guard); // Close handle early before querying path names
 
-    let mut buf = vec![0u8; 1024];
-    let mut returned = 0u32;
-
-    let ok = unsafe {
-        DeviceIoControl(
-            handle,
-            IOCTL_STORAGE_QUERY_PROPERTY,
-            Some(&query as *const _ as *const _),
-            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(buf.as_mut_ptr() as *mut _),
-            buf.len() as u32,
-            Some(&mut returned),
-            None,
+    // Two-pass approach to safely retrieve the mount points buffer
+    let guid_wide: Vec<u16> = guid_path.encode_utf16().chain(once(0)).collect();
+    let mut required_chars = 0u32;
+    let mut probe = [0u16; 1];
+    let _ = unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(guid_wide.as_ptr()),
+            Some(&mut probe),
+            &mut required_chars,
         )
     };
 
-    unsafe { CloseHandle(handle).ok() };
-
-    if ok.is_err() {
-        return None;
+    if required_chars == 0 {
+        return Some(Vec::new());
     }
 
-    // Safety: the IOCTL filled at least sizeof(STORAGE_DEVICE_DESCRIPTOR) bytes
-    // into `buf`, which is large enough (1 KiB).
-    let desc = unsafe { &*(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR) };
-    // In windows-crate 0.62, RemovableMedia is already `bool`.
-    Some(desc.RemovableMedia)
-}
-
-fn get_friendly_name(drive_index: u32) -> Option<String> {
-    // Disk class GUID: {4D36E967-E325-11CE-BFC1-08002BE10318}
-    let disk_guid = GUID::from_values(
-        0x4D36E967,
-        0xE325,
-        0x11CE,
-        [0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18],
-    );
-
-    let set = unsafe { SetupDiGetClassDevsW(Some(&disk_guid), None, None, DIGCF_PRESENT).ok()? };
-
-    let mut dev_info = SP_DEVINFO_DATA {
-        cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
-        ..Default::default()
-    };
-
-    // Enumerate device at `drive_index`.  On failure always destroy the set.
-    if unsafe { SetupDiEnumDeviceInfo(set, drive_index, &mut dev_info) }.is_err() {
-        unsafe { SetupDiDestroyDeviceInfoList(set).ok() };
-        return None;
-    }
-
-    // The property value is stored as UTF-16 bytes.  The windows-crate 0.62
-    // API takes `Option<&mut [u8]>` (buffer length is inferred from the slice
-    // length), replacing the old separate `cbPropertyBufferSize: u32` argument.
-    let mut buf = vec![0u8; 512]; // 256 UTF-16 code units × 2 bytes each
-
-    let prop_result = unsafe {
-        SetupDiGetDeviceRegistryPropertyW(
-            set,
-            &dev_info,
-            SPDRP_FRIENDLYNAME,
-            None, // don't need the registry type tag
+    let mut buf = vec![0u16; required_chars as usize];
+    if unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(guid_wide.as_ptr()),
             Some(&mut buf),
-            None, // don't need the required-size hint
+            &mut required_chars,
         )
-    };
+    }
+    .is_err()
+    {
+        return Some(Vec::new());
+    }
 
-    // Always destroy the device-info set, even if the property query failed.
-    unsafe { SetupDiDestroyDeviceInfoList(set).ok() };
+    // Parse the multi-string buffer into separate String elements
+    let mut vol_letters = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let term = buf[offset..].iter().position(|&c| c == 0).unwrap_or(0);
+        if term == 0 {
+            break; // Double-null terminator reached
+        }
 
-    prop_result.ok()?;
+        let mount_point = &buf[offset..offset + term];
+        let path_str = String::from_utf16_lossy(mount_point);
+        if !path_str.is_empty() {
+            vol_letters.push(path_str);
+        }
+        offset += term + 1;
+    }
 
-    // Reinterpret the raw bytes as a UTF-16 string and strip the null terminator.
-    // Safety: `buf` is aligned to 1 byte; `from_raw_parts` with `*const u16`
-    // requires only that the pointer is valid for `len` u16 reads, which it is.
-    let u16_slice =
-        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, buf.len() / 2) };
-    let end = u16_slice
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(u16_slice.len());
-    Some(String::from_utf16_lossy(&u16_slice[..end]))
+    Some(vol_letters)
 }

@@ -39,12 +39,12 @@ where
 /// (e.g. Windows keeps the lock handle alive here).
 pub trait RawWriteHandle {
     /// write to fill with offset
-    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()>;
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()>;
     /// read to fill with offset
-    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize>;
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize>;
 
     /// Flush kernel buffers → physical media. Must be called before Done.
-    async fn flush_to_disk(&mut self) -> FlashResult<()>;
+    fn flush_to_disk(&mut self) -> FlashResult<()>;
 
     /// Sector size for this device. Writes must be multiples on Windows.
     fn sector_size(&self) -> usize;
@@ -52,7 +52,7 @@ pub trait RawWriteHandle {
     /// Total writable size in bytes.
     fn size_bytes(&self) -> FlashResult<u64>;
     /// set the file to seek
-    async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()>;
+    fn seek(&mut self, seek: SeekFrom) -> FlashResult<()>;
 }
 /// Open a raw writable handle to a block device.
 /// Abstracted because Windows requires different open flags,

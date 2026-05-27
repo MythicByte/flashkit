@@ -5,7 +5,7 @@
 //!
 //! # Supported
 //! - [x] Linux
-//! - [ ] Windows
+//! - [x] Windows
 //! - [ ] Macos
 //!
 

@@ -142,15 +142,11 @@ where
                         *i = 0;
                     }
                 }
-                handle_target_write_to
-                    .write_at(offset, buffer_slice)
-                    .await?;
+                handle_target_write_to.write_at(offset, buffer_slice)?;
                 offset += read_back as u64;
                 break;
             } else {
-                handle_target_write_to
-                    .write_at(offset, buffer_slice)
-                    .await?;
+                handle_target_write_to.write_at(offset, buffer_slice)?;
                 offset += read_back as u64
             }
 
@@ -172,10 +168,8 @@ where
         on_progress
             .send(FlashProgress::create(FlashPhase::Flushing))
             .map_err(|_| FlashError::SendChannelError)?;
-        handle_target_write_to.flush_to_disk().await?;
-        handle_target_write_to
-            .seek(std::io::SeekFrom::Start(0))
-            .await?;
+        handle_target_write_to.flush_to_disk()?;
+        handle_target_write_to.seek(std::io::SeekFrom::Start(0))?;
         on_progress
             .send(FlashProgress::create(FlashPhase::Verifying))
             .map_err(|_| FlashError::SendChannelError)?;
@@ -223,7 +217,7 @@ where
             if offset >= written_bytes {
                 break;
             }
-            let read_back = handle.read_at(offset, buffer_slice).await?;
+            let read_back = handle.read_at(offset, buffer_slice)?;
             if read_back == 0 {
                 break;
             }
@@ -277,11 +271,10 @@ where
         // Wipe the backup GPT at the end of the disk
         let disk_size = handle.size_bytes()?;
         let end_offset = disk_size.saturating_sub(buffer.size() as u64);
-        handle.write_at(end_offset, &buffer_slice).await?;
+        handle.write_at(end_offset, &buffer_slice)?;
 
-        handle.flush_to_disk().await?;
-        handle.seek(std::io::SeekFrom::Start(0)).await?;
-        // tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        handle.flush_to_disk()?;
+        handle.seek(std::io::SeekFrom::Start(0))?;
 
         Ok(())
     }

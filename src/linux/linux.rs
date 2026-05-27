@@ -4,10 +4,6 @@ use std::{
         Seek,
         SeekFrom,
     },
-    os::fd::{
-        AsRawFd,
-        BorrowedFd,
-    },
     path::Path,
 };
 
@@ -264,43 +260,18 @@ impl DeviceEjector for LinuxDBus {
     }
 }
 impl RawWriteHandle for LinuxRawWriteHandle {
-    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        let fd = self.file.as_raw_fd();
-        let ptr = buf.as_ptr() as usize;
-        let len = buf.len();
-
-        tokio::task::spawn_blocking(move || {
-            let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-
-            // Perform a positional write directly using the OS file descriptor
-            // This is completely compatible with O_DIRECT requirements
-            // Safety: reconstruct a BorrowedFd with a local lifetime inside the closure
-            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            rustix::io::pwrite(borrowed_fd, slice, offset)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)?
-        .map_err(std::io::Error::from)?; // Converts rustix error into std::io::Error
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
+        rustix::io::pwrite(&self.file, buf, offset).map_err(std::io::Error::from)?;
         Ok(())
     }
 
-    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        let fd = self.file.as_raw_fd();
-        let ptr = buf.as_mut_ptr() as usize;
-        let len = buf.len();
-
-        let bytes_read = tokio::task::spawn_blocking(move || {
-            let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            rustix::io::pread(borrowed_fd, slice, offset)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)?
-        .map_err(std::io::Error::from)?;
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
+        let bytes_read =
+            rustix::io::pread(&self.file, buf, offset).map_err(std::io::Error::from)?;
         Ok(bytes_read)
     }
 
-    async fn flush_to_disk(&mut self) -> FlashResult<()> {
+    fn flush_to_disk(&mut self) -> FlashResult<()> {
         self.file.sync_all()?;
         Ok(())
     }
@@ -313,7 +284,7 @@ impl RawWriteHandle for LinuxRawWriteHandle {
         Ok(self.size_bytes)
     }
 
-    async fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
+    fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
         self.file.seek(seek).map_err(FlashError::Io)?;
         Ok(())
     }
