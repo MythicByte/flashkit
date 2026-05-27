@@ -11,6 +11,7 @@ use std::{
         Seek,
         SeekFrom,
     },
+    iter::once,
     mem::size_of,
     os::windows::{
         fs::FileExt,
@@ -71,15 +72,57 @@ use crate::traits::{
     RawWriteHandle,
 };
 
-/// Automatically closes the specialized volume search handle.
-struct AutoCloseVolumeFind(HANDLE);
-impl Drop for AutoCloseVolumeFind {
+/// Closes any file or device HANDLE on drop.
+struct AutoCloseHandle(HANDLE);
+
+impl Drop for AutoCloseHandle {
     fn drop(&mut self) {
         if !self.0.is_invalid() {
             unsafe {
-                FindVolumeClose(self.0).ok();
+                CloseHandle(self.0).ok();
             }
         }
+    }
+}
+
+/// Owns a `FindFirstVolumeW` enumeration cursor and closes it on drop.
+///
+/// The raw HANDLE is kept private; all access goes through the typed methods
+/// below.  This prevents the Copy-able raw value from "escaping" and being
+/// used independently of its owner.
+struct VolumeFindHandle(HANDLE);
+
+impl VolumeFindHandle {
+    /// Begin volume enumeration.  Writes the first volume's GUID path into
+    /// `buf` and returns the guard that owns the cursor.
+    ///
+    /// A volume GUID path looks like `\\?\Volume{xxxxxxxx-...}\` — a stable,
+    /// letter-independent name for a volume that does not change even if the
+    /// drive letter is reassigned.
+    fn start(buf: &mut [u16]) -> FlashResult<Self> {
+        let handle = unsafe {
+            FindFirstVolumeW(buf)
+                .map_err(|_| FlashError::FilesystemError("FindFirstVolumeW failed".into()))?
+        };
+        // INVALID_HANDLE_VALUE here would mean the system has no volumes at
+        // all — not possible in practice, but we guard against it anyway.
+        if handle.is_invalid() {
+            return Err(FlashError::SyncError);
+        }
+        Ok(Self(handle))
+    }
+
+    /// Advance the cursor and write the next GUID path into `buf`.
+    /// Returns `true` while more volumes remain, `false` when the list is
+    /// exhausted (Windows signals ERROR_NO_MORE_FILES).
+    fn advance(&self, buf: &mut [u16]) -> bool {
+        unsafe { FindNextVolumeW(self.0, buf) }.is_ok()
+    }
+}
+
+impl Drop for VolumeFindHandle {
+    fn drop(&mut self) {
+        unsafe { FindVolumeClose(self.0).ok() };
     }
 }
 #[derive(Deserialize)]
@@ -299,98 +342,30 @@ impl DeviceUnmounter for WindowsInterface {
 }
 
 fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
+    const VOLUME_GUID_BUF_LEN: usize = 64;
+    let mut vol_buf = vec![0u16; VOLUME_GUID_BUF_LEN];
+
     let target_number = physical_drive_number(physical_path)?;
 
-    let mut vol_buf = vec![0u16; 260];
-
-    // FindFirstVolumeW fills vol_buf with the GUID path of the first volume,
-    // e.g. "\\?\Volume{...}\".
-    let find_handle = unsafe {
-        FindFirstVolumeW(&mut vol_buf)
-            .map_err(|_| FlashError::FilesystemError("FindFirstVolumeW failed".into()))?
-    };
-
-    // checks handle
-    if find_handle.is_invalid() {
-        return Err(FlashError::SyncError);
-    }
-    let _find_guard = AutoCloseVolumeFind(find_handle);
+    // Start enumeration.  The guard calls `FindVolumeClose` when it drops,
+    // regardless of how this function exits.
+    let finder = VolumeFindHandle::start(&mut vol_buf)?;
 
     loop {
-        let end = vol_buf
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(vol_buf.len());
-        let possible_string = &vol_buf.get(..end).ok_or(FlashError::OutOfBoundsArray)?;
-        let guid_path = String::from_utf16_lossy(possible_string);
+        let guid_path = decode_wide_nul_string(&vol_buf);
 
-        // Strip the trailing '\' to form a device path accepted by CreateFileW.
-        let device_path = guid_path.trim_end_matches('\\');
-        let device_wide: Vec<u16> = device_path
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        // Per-volume errors are absorbed here.  A locked or inaccessible
+        // volume should not abort the whole unmount operation.
+        process_single_volume(&guid_path, target_number);
 
-        // Open with zero-access just to query the device number.
-        if let Ok(vh) = unsafe {
-            CreateFileW(
-                PCWSTR(device_wide.as_ptr()),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                None,
-            )
-        } {
-            let matches = storage_device_number(vh)
-                .map(|n| n == target_number)
-                .unwrap_or(false);
-            unsafe { CloseHandle(vh).ok() };
-
-            if matches {
-                // Remove all mount points (drive letters / directory links).
-                remove_mount_points(&guid_path);
-
-                // Re-open with write access to issue FSCTL_DISMOUNT_VOLUME.
-                if let Ok(wh) = unsafe {
-                    CreateFileW(
-                        PCWSTR(device_wide.as_ptr()),
-                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        None,
-                        OPEN_EXISTING,
-                        FILE_FLAGS_AND_ATTRIBUTES(0),
-                        None,
-                    )
-                } {
-                    let mut returned = 0u32;
-                    unsafe {
-                        DeviceIoControl(
-                            wh,
-                            FSCTL_DISMOUNT_VOLUME,
-                            None,
-                            0,
-                            None,
-                            0,
-                            Some(&mut returned),
-                            None,
-                        )
-                        .ok();
-                        CloseHandle(wh).ok();
-                    }
-                }
-            }
-        }
-
-        // Advance; break when the enumeration is exhausted (ERROR_NO_MORE_FILES).
+        // Advance the cursor.  When there are no more volumes,
+        // `FindNextVolumeW` signals ERROR_NO_MORE_FILES and we stop.
         vol_buf.fill(0);
-        if unsafe { FindNextVolumeW(find_handle, &mut vol_buf) }.is_err() {
+        if !finder.advance(&mut vol_buf) {
             break;
         }
     }
 
-    unsafe { FindVolumeClose(find_handle).ok() };
     Ok(())
 }
 
@@ -437,38 +412,174 @@ fn storage_device_number(handle: HANDLE) -> Option<u32> {
     Some(sdn.DeviceNumber)
 }
 
-/// Remove every mount-point path (drive letter or directory junction)
-/// associated with the volume whose GUID path is `guid_path`.
-///
-/// `guid_path` must end with `\`, as returned by `FindFirstVolumeW`.
-fn remove_mount_points(guid_path: &str) {
-    let guid_wide: Vec<u16> = guid_path.encode_utf16().chain(std::iter::once(0)).collect();
-    // Allocate generously — `GetVolumePathNamesForVolumeNameW` may fail and
-    // retry with a larger buffer, but 1 KiB covers typical cases.
-    let mut buf = vec![0u16; 1024];
-    let mut len = 0u32;
+// `GetVolumePathNamesForVolumeNameW` returns all of a volume's mount points
+// as a "multi-string": consecutive null-terminated UTF-16 strings packed into
+// one buffer, ending with an extra null:
+//
+//   C:\<NUL>D:\Data\<NUL><NUL>
+//
+// The safe approach is the two-pass pattern:
+//   Pass 1 — call with a 1-element probe buffer.  The call fails but Windows
+//             sets `required_chars` to the number of UTF-16 code units needed.
+//   Pass 2 — allocate exactly that many code units and call again.
+//
+// A fixed-size buffer (as the original used) silently fails when a drive has
+// many or long mount points, leaving them attached and causing the later
+// FSCTL_DISMOUNT_VOLUME to produce incomplete results.
 
+fn remove_mount_points(guid_path: &str) {
+    let guid_wide: Vec<u16> = guid_path.encode_utf16().chain(once(0)).collect();
+
+    let mut required_chars = 0u32;
+    let mut probe = [0u16; 1];
+    let _ = unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(guid_wide.as_ptr()),
+            Some(&mut probe),
+            &mut required_chars,
+        )
+    };
+
+    if required_chars == 0 {
+        return; // no mount points, or volume not accessible
+    }
+
+    let mut buf = vec![0u16; required_chars as usize];
     if unsafe {
-        GetVolumePathNamesForVolumeNameW(PCWSTR(guid_wide.as_ptr()), Some(&mut buf), &mut len)
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(guid_wide.as_ptr()),
+            Some(&mut buf),
+            &mut required_chars,
+        )
     }
     .is_err()
     {
+        // Should not happen after a correctly-sized allocation, but we stop
+        // rather than walk uninitialised memory.
         return;
     }
 
-    // The buffer is a multi-string: null-terminated strings back-to-back,
-    // terminated by an extra null ("C:\\\0D:\\\0\0").
+    // Walk the multi-string and delete each mount point
+    //
+    //   C:\<NUL>D:\Data\<NUL><NUL>
+    //   ^-------^              ^^
+    //   first entry       double-null = end of list
     let mut offset = 0usize;
-    while offset < buf.len() {
+    loop {
         let term = buf[offset..].iter().position(|&c| c == 0).unwrap_or(0);
         if term == 0 {
-            break; // double-null end marker
+            break; // double-null: no more entries
         }
-        // Build a slice that includes the null terminator for PCWSTR.
-        let mp = &buf[offset..offset + term + 1];
+        // Include the null terminator — PCWSTR is a C-style null-terminated pointer.
+        let mount_point = &buf[offset..offset + term + 1];
         unsafe {
-            DeleteVolumeMountPointW(PCWSTR(mp.as_ptr())).ok();
+            DeleteVolumeMountPointW(PCWSTR(mount_point.as_ptr())).ok();
         }
         offset += term + 1;
     }
+}
+/// Decode a null-terminated UTF-16 string from a buffer.
+///
+/// `position` returns an index guaranteed to be ≤ `buf.len()`, so the slice
+/// is always in-bounds — no fallible `get` or `?` needed.
+fn decode_wide_nul_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+// Separating this from the enumeration loop keeps two concerns distinct:
+//   - The loop in `unmount_volumes_on_drive` is only about *iteration*.
+//   - This function is only about *what to do with one volume*.
+//
+// All handle management here uses `AutoCloseHandle` so every CreateFileW
+// handle is closed exactly once, automatically, with no manual CloseHandle
+// calls needed.
+
+/// If `guid_path` belongs to the drive numbered `target_number`, remove all
+/// its mount points and dismount its filesystem.  Errors are absorbed: an
+/// inaccessible or already-unmounted volume is silently skipped.
+fn process_single_volume(guid_path: &str, target_number: u32) {
+    // CreateFileW requires the path without the trailing backslash.
+    let device_path = guid_path.trim_end_matches('\\');
+    let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
+
+    // ── open with zero desired-access and check which physical drive
+    //            this volume lives on.
+    //
+    // Zero desired-access is enough to send an IOCTL.  Think of an IOCTL as a
+    // typed question sent to a device driver: here we ask
+    // "what physical drive number are you on?"
+    let Ok(query_handle) = (unsafe {
+        CreateFileW(
+            PCWSTR(device_wide.as_ptr()),
+            0, // zero desired-access: query-only, no read or write
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }) else {
+        return; // volume not accessible (already removed, etc.); skip it
+    };
+
+    // The guard closes `query_handle` when it leaves scope.
+    let query_guard = AutoCloseHandle(query_handle);
+
+    let is_match = storage_device_number(query_handle) == Some(target_number);
+
+    // Done querying; release the handle early.
+    drop(query_guard);
+
+    if !is_match {
+        return;
+    }
+
+    // ──  detach all drive letters and directory junctions.
+    //
+    // A "mount point" is any name through which users reach this volume —
+    // the most common form is a drive letter like `D:\`, but Windows also
+    // supports mounting volumes at arbitrary directory paths.
+    remove_mount_points(guid_path);
+
+    // ── Step 3: open with write access and flush/lock the filesystem.
+    //
+    // FSCTL_DISMOUNT_VOLUME tells the filesystem driver to write any
+    // pending data to disk and mark itself as cleanly unmounted.  After
+    // this call the volume still exists in the OS's internal table, but
+    // its filesystem is no longer active — exactly what we need before
+    // writing a raw disk image over the underlying device.
+    let Ok(write_handle) = (unsafe {
+        CreateFileW(
+            PCWSTR(device_wide.as_ptr()),
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }) else {
+        return;
+    };
+
+    // write_guard (no underscore) signals: this binding is intentionally kept
+    // alive to close write_handle at end of scope — it is not an unused value.
+    let write_guard = AutoCloseHandle(write_handle);
+
+    let mut bytes_returned = 0u32;
+    unsafe {
+        DeviceIoControl(
+            write_handle,
+            FSCTL_DISMOUNT_VOLUME,
+            None,
+            0,
+            None,
+            0,
+            Some(&mut bytes_returned),
+            None,
+        )
+        .ok(); // best-effort: already-gone volumes are fine
+    }
+
+    drop(write_guard); // explicit for clarity; would also drop at end of scope
 }
