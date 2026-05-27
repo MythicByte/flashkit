@@ -55,39 +55,30 @@ pub struct DarwinRawWriteHandle {
     size_bytes: u64,
 }
 impl RawWriteHandle for DarwinRawWriteHandle {
-    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
         let fd = self.file.as_raw_fd();
         let ptr = buf.as_ptr() as usize;
         let len = buf.len();
 
-        tokio::task::spawn_blocking(move || {
-            let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+        let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
 
-            // Perform a positional write directly using the OS file descriptor
-            // This is completely compatible with O_DIRECT requirements
-            // Safety: reconstruct a BorrowedFd with a local lifetime inside the closure
-            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            rustix::io::pwrite(borrowed_fd, slice, offset)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)?
-        .map_err(std::io::Error::from)?; // Converts rustix error into std::io::Error
+        // Perform a positional write directly using the OS file descriptor
+        // This is completely compatible with O_DIRECT requirements
+        // Safety: reconstruct a BorrowedFd with a local lifetime inside the closure
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        rustix::io::pwrite(borrowed_fd, slice, offset).map_err(std::io::Error::from)?; // Converts rustix error into std::io::Error
         Ok(())
     }
 
-    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
         let fd = self.file.as_raw_fd();
         let ptr = buf.as_mut_ptr() as usize;
         let len = buf.len();
 
-        let bytes_read = tokio::task::spawn_blocking(move || {
-            let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-            rustix::io::pread(borrowed_fd, slice, offset)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)?
-        .map_err(std::io::Error::from)?;
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        let bytes_read =
+            rustix::io::pread(borrowed_fd, slice, offset).map_err(std::io::Error::from)?;
         Ok(bytes_read)
     }
 
