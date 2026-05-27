@@ -106,25 +106,18 @@ pub struct WindowsRawWriteHandle {
 
 impl RawWriteHandle for WindowsRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
-        let ptr = buf.as_ptr() as usize;
-        let len = buf.len();
-
-        let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-        fd.seek_write(slice, offset)
+        self.file
+            .seek_write(buf, offset)
             .map_err(|_| FlashError::SyncError)?;
+
         Ok(())
     }
 
     /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
-        let ptr = buf.as_mut_ptr() as usize;
-        let len = buf.len();
-
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-        let bytes_read = fd
-            .seek_read(slice, offset)
+        let bytes_read = self
+            .file
+            .seek_read(buf, offset)
             .map_err(|_| FlashError::SyncError)?;
         Ok(bytes_read)
     }
