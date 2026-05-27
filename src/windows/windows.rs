@@ -70,6 +70,18 @@ use crate::traits::{
     DeviceWriter,
     RawWriteHandle,
 };
+
+/// Automatically closes the specialized volume search handle.
+struct AutoCloseVolumeFind(HANDLE);
+impl Drop for AutoCloseVolumeFind {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                FindVolumeClose(self.0).ok();
+            }
+        }
+    }
+}
 #[derive(Deserialize)]
 #[serde(rename = "Win32_DiskDrive")]
 #[serde(rename_all = "PascalCase")]
@@ -293,14 +305,17 @@ fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
 
     // FindFirstVolumeW fills vol_buf with the GUID path of the first volume,
     // e.g. "\\?\Volume{...}\".
-    let find = unsafe {
+    let find_handle = unsafe {
         FindFirstVolumeW(&mut vol_buf)
             .map_err(|_| FlashError::FilesystemError("FindFirstVolumeW failed".into()))?
     };
 
-    if find.is_invalid() {
+    // checks handle
+    if find_handle.is_invalid() {
         return Err(FlashError::SyncError);
     }
+    let _find_guard = AutoCloseVolumeFind(find_handle);
+
     loop {
         let end = vol_buf
             .iter()
@@ -370,12 +385,12 @@ fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
 
         // Advance; break when the enumeration is exhausted (ERROR_NO_MORE_FILES).
         vol_buf.fill(0);
-        if unsafe { FindNextVolumeW(find, &mut vol_buf) }.is_err() {
+        if unsafe { FindNextVolumeW(find_handle, &mut vol_buf) }.is_err() {
             break;
         }
     }
 
-    unsafe { FindVolumeClose(find).ok() };
+    unsafe { FindVolumeClose(find_handle).ok() };
     Ok(())
 }
 
