@@ -1,76 +1,41 @@
 use crate::{
     data_types::BlockDevice,
-    error::{
-        FlashError,
-        FlashResult,
-    },
+    error::{FlashError, FlashResult},
 };
 use serde::Deserialize;
 use std::{
-    io::{
-        Seek,
-        SeekFrom,
-    },
+    io::{Seek, SeekFrom},
     mem::size_of,
     os::windows::{
         fs::FileExt,
-        io::{
-            AsRawHandle,
-            FromRawHandle,
-        },
+        io::{AsRawHandle, FromRawHandle},
     },
-    path::{
-        Path,
-        PathBuf,
-    },
+    path::{Path, PathBuf},
 };
 use tracing::info;
 use windows::{
     Win32::{
-        Foundation::{
-            CloseHandle,
-            HANDLE,
-        },
+        Foundation::{CloseHandle, HANDLE},
         Storage::FileSystem::{
-            CreateFileW,
-            DeleteVolumeMountPointW,
-            FILE_FLAG_NO_BUFFERING,
-            FILE_FLAG_WRITE_THROUGH,
-            FILE_FLAGS_AND_ATTRIBUTES,
-            FILE_GENERIC_READ,
-            FILE_GENERIC_WRITE,
-            FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
-            FindFirstVolumeW,
-            FindNextVolumeW,
-            FindVolumeClose,
-            FlushFileBuffers,
-            GetVolumePathNamesForVolumeNameW,
-            OPEN_EXISTING,
+            CreateFileW, DeleteVolumeMountPointW, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, FlushFileBuffers,
+            GetVolumePathNamesForVolumeNameW, OPEN_EXISTING,
         },
         System::{
             IO::DeviceIoControl,
             Ioctl::{
-                FSCTL_DISMOUNT_VOLUME,
-                IOCTL_STORAGE_EJECT_MEDIA,
-                IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                FSCTL_DISMOUNT_VOLUME, IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
             },
         },
     },
     core::PCWSTR,
 };
-use wmi::{
-    WMIConnection,
-    WMIError,
-};
+use wmi::{WMIConnection, WMIError};
 
 use crate::traits::{
-    DeviceEjector,
-    DeviceEnumerator,
-    DeviceUnmounter,
-    DeviceWriter,
-    RawWriteHandle,
+    DeviceEjector, DeviceEnumerator, DeviceUnmounter, DeviceWriter, RawWriteHandle,
 };
 #[derive(Deserialize)]
 #[serde(rename = "Win32_DiskDrive")]
@@ -115,6 +80,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 
         tokio::task::spawn_blocking(move || {
             let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+            info!("File write: {}", slice.len());
             fd.seek_write(slice, offset)
         })
         .await
@@ -195,7 +161,7 @@ impl DeviceWriter for WindowsInterface {
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     None,
                     OPEN_EXISTING,
-                    FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
+                    FILE_ATTRIBUTE_NORMAL,
                     None,
                 )
                 .map_err(FlashError::WindowsError)?
