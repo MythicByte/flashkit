@@ -1,40 +1,74 @@
 use crate::{
     data_types::BlockDevice,
-    error::{FlashError, FlashResult},
+    error::{
+        FlashError,
+        FlashResult,
+    },
 };
 use serde::Deserialize;
 use std::{
-    io::{Seek, SeekFrom},
+    io::{
+        Seek,
+        SeekFrom,
+    },
     mem::size_of,
     os::windows::{
         fs::FileExt,
-        io::{AsRawHandle, FromRawHandle},
+        io::{
+            AsRawHandle,
+            FromRawHandle,
+        },
     },
-    path::{Path, PathBuf},
+    path::{
+        Path,
+        PathBuf,
+    },
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE},
+        Foundation::{
+            CloseHandle,
+            HANDLE,
+        },
         Storage::FileSystem::{
-            CreateFileW, DeleteVolumeMountPointW, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, FlushFileBuffers,
-            GetVolumePathNamesForVolumeNameW, OPEN_EXISTING,
+            CreateFileW,
+            DeleteVolumeMountPointW,
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAGS_AND_ATTRIBUTES,
+            FILE_GENERIC_READ,
+            FILE_GENERIC_WRITE,
+            FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+            FindFirstVolumeW,
+            FindNextVolumeW,
+            FindVolumeClose,
+            FlushFileBuffers,
+            GetVolumePathNamesForVolumeNameW,
+            OPEN_EXISTING,
         },
         System::{
             IO::DeviceIoControl,
             Ioctl::{
-                FSCTL_DISMOUNT_VOLUME, IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                FSCTL_DISMOUNT_VOLUME,
+                IOCTL_STORAGE_EJECT_MEDIA,
+                IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
             },
         },
     },
     core::PCWSTR,
 };
-use wmi::{WMIConnection, WMIError};
+use wmi::{
+    WMIConnection,
+    WMIError,
+};
 
 use crate::traits::{
-    DeviceEjector, DeviceEnumerator, DeviceUnmounter, DeviceWriter, RawWriteHandle,
+    DeviceEjector,
+    DeviceEnumerator,
+    DeviceUnmounter,
+    DeviceWriter,
+    RawWriteHandle,
 };
 #[derive(Deserialize)]
 #[serde(rename = "Win32_DiskDrive")]
@@ -71,32 +105,27 @@ pub struct WindowsRawWriteHandle {
 }
 
 impl RawWriteHandle for WindowsRawWriteHandle {
-    async fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
         let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         let ptr = buf.as_ptr() as usize;
         let len = buf.len();
 
-        tokio::task::spawn_blocking(move || {
-            let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-            fd.seek_write(slice, offset)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
+        let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+        fd.seek_write(slice, offset)
+            .map_err(|_| FlashError::SyncError)?;
         Ok(())
     }
 
     /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
-    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
         let fd = self.file.try_clone().map_err(|_| FlashError::SyncError)?;
         let ptr = buf.as_mut_ptr() as usize;
         let len = buf.len();
 
-        let bytes_read = tokio::task::spawn_blocking(move || {
-            let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-            fd.seek_read(slice, offset)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)??;
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
+        let bytes_read = fd
+            .seek_read(slice, offset)
+            .map_err(|_| FlashError::SyncError)?;
         Ok(bytes_read)
     }
 
