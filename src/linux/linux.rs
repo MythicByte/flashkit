@@ -4,10 +4,6 @@ use std::{
         Seek,
         SeekFrom,
     },
-    os::fd::{
-        AsRawFd,
-        BorrowedFd,
-    },
     path::Path,
 };
 
@@ -265,29 +261,13 @@ impl DeviceEjector for LinuxDBus {
 }
 impl RawWriteHandle for LinuxRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        let fd = self.file.as_raw_fd();
-        let ptr = buf.as_ptr() as usize;
-        let len = buf.len();
-
-        let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-
-        // Perform a positional write directly using the OS file descriptor
-        // This is completely compatible with O_DIRECT requirements
-        // Safety: reconstruct a BorrowedFd with a local lifetime inside the closure
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-        rustix::io::pwrite(borrowed_fd, slice, offset).map_err(std::io::Error::from)?; // Converts rustix error into std::io::Error
+        rustix::io::pwrite(&self.file, buf, offset).map_err(std::io::Error::from)?;
         Ok(())
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        let fd = self.file.as_raw_fd();
-        let ptr = buf.as_mut_ptr() as usize;
-        let len = buf.len();
-
-        let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) };
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
         let bytes_read =
-            rustix::io::pread(borrowed_fd, slice, offset).map_err(std::io::Error::from)?;
+            rustix::io::pread(&self.file, buf, offset).map_err(std::io::Error::from)?;
         Ok(bytes_read)
     }
 
