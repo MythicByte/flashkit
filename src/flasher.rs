@@ -54,14 +54,37 @@ where
             .send(FlashProgress::create(FlashPhase::CheckingHash))
             .map_err(|_| FlashError::SendChannelError)?;
 
+        let total_bytes_hash = &source_of_image.uncompressed_size();
         if let Some(hash_test_against) = &source_of_image.expected_hash() {
             let mut buff_reader = tokio::io::BufReader::new(source_of_image.file);
+            let mut bytes_checked: u64 = 0;
+            let mut bytes_since_last_report: u64 = 0;
+            let mut timer = std::time::Instant::now();
             {
                 buff_reader.fill_buf().await?;
                 let mut hash_tester = Sha256::new();
                 while !buff_reader.buffer().is_empty() {
+                    let chunk_len = buff_reader.buffer().len();
+
                     hash_tester.update(&buff_reader.buffer());
                     buff_reader.consume(buff_reader.buffer().len());
+
+                    bytes_checked += chunk_len as u64;
+                    bytes_since_last_report += chunk_len as u64;
+                    let elapsed = timer.elapsed().as_secs_f64();
+                    if elapsed >= 1.00 {
+                        on_progress
+                            .send(FlashProgress {
+                                bytes_written: bytes_checked,
+                                total_bytes: *total_bytes_hash,
+                                bytes_per_sec: bytes_since_last_report as f64 / elapsed,
+                                phase: FlashPhase::CheckingHash,
+                            })
+                            .map_err(|_| FlashError::SendChannelError)?;
+
+                        bytes_since_last_report = 0;
+                        timer = std::time::Instant::now();
+                    }
                     buff_reader.fill_buf().await?;
                 }
                 let hash_finalized = hash_tester.finalize();
@@ -238,6 +261,7 @@ where
                     .map_err(|_| FlashError::SendChannelError)?;
                 tmp_counter = 0;
                 timer = std::time::Instant::now();
+                tokio::task::yield_now().await;
             }
         }
 
