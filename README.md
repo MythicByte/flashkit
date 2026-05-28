@@ -52,7 +52,7 @@
 Add this to your `Cargo.toml`:
 
 ```toml
-flashkit = { git = "https://github.com/yourname/flashkit" }
+flashkit = { git = "https://gitlab.com/MythicByte/flashkit" }
 ```
 
 ### Minimal Example
