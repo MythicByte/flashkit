@@ -1,1 +1,2 @@
-pub(crate) mod macos;
+/// macos
+pub mod macos;
