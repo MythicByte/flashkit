@@ -105,8 +105,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## License
 
-[MIT]
-[Apache v2]
+Dual-licensed under either:
+
+- [MIT](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+You may use this project under either license.
 
 ---
 
