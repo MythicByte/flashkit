@@ -233,7 +233,16 @@ impl Display for Size {
         }
     }
 }
-
+impl Default for FlashProgress {
+    fn default() -> Self {
+        Self {
+            bytes_written: 0,
+            total_bytes: 0,
+            bytes_per_sec: 0.0,
+            phase: FlashPhase::Preparing,
+        }
+    }
+}
 /// generates from bytes rounded biggest value
 #[must_use]
 pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
