@@ -1,10 +1,20 @@
 use std::{
-    collections::HashMap,
+    collections::{
+        HashMap,
+        HashSet,
+    },
     io::{
         Seek,
         SeekFrom,
     },
-    path::Path,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
+use tokio_stream::{
+    StreamExt,
+    wrappers::ReceiverStream,
 };
 
 use zbus::zvariant::{
@@ -17,12 +27,16 @@ use zvariant::{
 };
 
 use crate::{
-    data_types::BlockDevice,
+    data_types::{
+        BlockDevice,
+        DeviceEvent,
+    },
     error::{
         FlashError,
         FlashResult,
     },
     traits::{
+        AsyncDeviceEnumerator,
         DeviceEjector,
         DeviceEnumerator,
         DeviceUnmounter,
@@ -98,7 +112,29 @@ trait UDisks2Filesystem {
         options: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
     ) -> zbus::Result<()>;
 }
+#[zbus::proxy(
+    interface = "org.freedesktop.DBus.ObjectManager",
+    default_service = "org.freedesktop.UDisks2",
+    default_path = "/org/freedesktop/UDisks2"
+)]
+trait UDisks2ObjectManager {
+    #[zbus(signal)]
+    fn interfaces_added(
+        &self,
+        object_path: zbus::zvariant::ObjectPath<'_>,
+        interfaces_and_properties: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        >,
+    ) -> zbus::Result<()>;
 
+    #[zbus(signal)]
+    fn interfaces_removed(
+        &self,
+        object_path: zbus::zvariant::ObjectPath<'_>,
+        interfaces: Vec<String>,
+    ) -> zbus::Result<()>;
+}
 /// Linux a connection to the d bus system bus
 #[derive(Debug, Clone)]
 pub struct LinuxDBus {
@@ -111,6 +147,153 @@ impl LinuxDBus {
         let connection = zbus::Connection::system().await?;
         Ok(Self { connection })
     }
+}
+impl AsyncDeviceEnumerator for LinuxDBus {
+    type WatchStream = ReceiverStream<DeviceEvent>;
+    async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
+        let devices = self.list_devices().await?;
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+        for dev in devices.clone() {
+            if tx.send(DeviceEvent::Added(dev)).await.is_err() {
+                break;
+            }
+        }
+
+        let existing: std::collections::HashSet<PathBuf> =
+            devices.into_iter().map(|d| d.path).collect();
+
+        let conn = self.connection.clone();
+        tokio::spawn(async move {
+            if let Err(e) = linux_watcher_task(conn, existing, tx).await {
+                tracing::error!("Linux device watcher stopped: {e}");
+            }
+        });
+
+        Ok(ReceiverStream::new(rx))
+    }
+}
+async fn linux_watcher_task(
+    conn: zbus::Connection,
+    // Paths already known at subscription time; used to suppress
+    // spurious Added events from InterfacesAdded races on startup.
+    already_known: std::collections::HashSet<PathBuf>,
+    tx: tokio::sync::mpsc::Sender<DeviceEvent>,
+) -> FlashResult<()> {
+    // FIX: Instantiate the D-Bus object manager proxy
+    let proxy = UDisks2ObjectManagerProxy::new(&conn).await?;
+    let mut added_stream = proxy.receive_interfaces_added().await?;
+    let mut removed_stream = proxy.receive_interfaces_removed().await?;
+
+    // Initialize our tracking set with the already known snapshot
+    let mut known: HashSet<PathBuf> = already_known;
+
+    loop {
+        tokio::select! {
+            signal = added_stream.next() => {
+                let Some(signal) = signal else { break };
+
+                let args = match signal.args() {
+                    Ok(a) => a,
+                    Err(e) => { tracing::warn!("InterfacesAdded args error: {e}"); continue; }
+                };
+
+                if !is_block_device_path(args.object_path.as_str()) { continue; }
+                if !args.interfaces_and_properties
+                    .contains_key("org.freedesktop.UDisks2.Block") { continue; }
+
+                let obj_path: OwnedObjectPath = args.object_path.clone().into();
+                match block_obj_to_device(&conn, &obj_path).await {
+                    Ok(dev) => {
+                        // Check if it's already known. If not, insert and dispatch to user
+                        if known.insert(dev.path.clone()) {
+                            if tx.send(DeviceEvent::Added(dev)).await.is_err() { break; }
+                        }
+                    }
+                    Err(e) => tracing::debug!("Skipping added object (filtered): {e}"),
+                }
+            }
+
+            signal = removed_stream.next() => {
+                let Some(signal) = signal else { break };
+
+                let args = match signal.args() {
+                    Ok(a) => a,
+                    Err(e) => { tracing::warn!("InterfacesRemoved args error: {e}"); continue; }
+                };
+
+                if !is_block_device_path(args.object_path.as_str()) { continue; }
+                if !args.interfaces.iter().any(|i| i == "org.freedesktop.UDisks2.Block") {
+                    continue;
+                }
+
+                let dev_name = args.object_path.as_str().rsplit('/').next().unwrap_or_default();
+                let path = PathBuf::from(format!("/dev/{dev_name}"));
+
+                // If the device was explicitly tracked by us, remove it and alert user
+                if known.remove(&path) {
+                    if tx.send(DeviceEvent::Removed(path)).await.is_err() { break; }
+                }
+            }
+
+            else => break,
+        }
+    }
+
+    Ok(())
+}
+async fn block_obj_to_device(
+    conn: &zbus::Connection,
+    obj_path: &OwnedObjectPath,
+) -> FlashResult<BlockDevice> {
+    let block_proxy = UDisks2BlockProxy::builder(conn)
+        .path(obj_path.as_str())?
+        .build()
+        .await?;
+
+    let device_bytes = block_proxy.device().await.unwrap_or_default();
+    let path_str = String::from_utf8_lossy(&device_bytes).to_string();
+    let trimmed = path_str.trim_end_matches('\0');
+    let path = std::path::PathBuf::from(&trimmed);
+
+    // Apply the same device type exclusion filters used during list_devices
+    if trimmed.starts_with("/dev/loop")
+        || trimmed.starts_with("/dev/ram")
+        || trimmed.starts_with("/dev/zram")
+        || trimmed.chars().last().unwrap_or(' ').is_ascii_digit()
+    {
+        return Err(FlashError::DeviceNotFound(path));
+    }
+
+    let size_bytes = block_proxy.size().await.unwrap_or(0);
+    let sector_size = block_proxy.hw_sector_size().await.unwrap_or(512) as usize;
+    let drive_obj_path = block_proxy.drive().await?;
+
+    let drive_proxy = UDisks2DriveProxy::builder(conn)
+        .path(drive_obj_path.as_str())?
+        .build()
+        .await?;
+
+    let name = drive_proxy
+        .model()
+        .await
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    let is_removable = drive_proxy.removable().await.unwrap_or(false);
+
+    Ok(BlockDevice {
+        path,
+        name,
+        size_bytes,
+        is_removable,
+        sector_size,
+    })
+}
+fn is_block_device_path(path: &str) -> bool {
+    let Some(suffix) = path.strip_prefix("/org/freedesktop/UDisks2/block_devices/") else {
+        return false;
+    };
+    // Reject partitions (sdb1, nvme0n1p2, …) — same rule as list_devices.
+    !suffix.is_empty() && !suffix.chars().last().unwrap_or(' ').is_ascii_digit()
 }
 impl DeviceEnumerator for LinuxDBus {
     async fn list_devices(&self) -> FlashResult<Vec<crate::data_types::BlockDevice>> {

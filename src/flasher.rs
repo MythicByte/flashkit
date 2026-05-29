@@ -26,6 +26,7 @@ use crate::{
         FlashResult,
     },
     traits::{
+        AsyncDeviceEnumerator,
         DeviceEjector,
         DeviceEnumerator,
         DeviceUnmounter,
@@ -38,7 +39,7 @@ use crate::{
 
 impl<T> FlasherGeneric<T> for Flasher<T>
 where
-    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
 {
     /// flash async versions
     async fn flash(
@@ -281,7 +282,7 @@ where
 }
 impl<T> Flasher<T>
 where
-    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
 {
     async fn wipe_partition_table(handle: &mut T::Handle) -> FlashResult<()>
     where

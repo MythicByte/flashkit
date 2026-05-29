@@ -81,17 +81,9 @@ pub trait AsyncDeviceEnumerator: DeviceEnumerator {
     /// watches a device async
     ///
     /// Watch for hotplug events (USB insert/remove).
-    /// Returns a channel receiver; caller drops it to stop watching.
-    fn watch_devices(
-        &self,
-    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_;
     /// Gives at startup the devices back and then watching
-    ///
-    /// Watch for hotplug events (USB insert/remove).
     /// Returns a channel receiver; caller drops it to stop watching.
-    fn watch_devices_with_initial(
-        &self,
-    ) -> impl std::future::Future<Output = FlashResult<Self::WatchStream>> + Send + '_;
+    async fn watch_devices(&self) -> FlashResult<Self::WatchStream>;
 }
 /// Unmount all filesystems on a device before writing.
 ///   Linux   → umount2() syscall via nix
@@ -112,7 +104,7 @@ pub trait DeviceEjector {
 #[derive(Debug, Clone)]
 pub struct Flasher<T>
 where
-    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
 {
     /// interface
     pub interface: T,
@@ -120,7 +112,7 @@ where
 
 impl<T> Flasher<T>
 where
-    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
 {
     /// basic constructor
     pub fn new(interface: T) -> Self {
@@ -129,5 +121,9 @@ where
     /// Get all storage decies with intoformation
     pub async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
         self.interface.list_devices().await
+    }
+    /// get async the storage devices
+    pub async fn watch_devices(&self) -> FlashResult<<T as AsyncDeviceEnumerator>::WatchStream> {
+        self.interface.watch_devices().await
     }
 }
