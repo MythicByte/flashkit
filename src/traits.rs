@@ -104,7 +104,7 @@ pub trait DeviceEjector {
 #[derive(Debug, Clone)]
 pub struct Flasher<T>
 where
-    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
 {
     /// interface
     pub interface: T,
@@ -112,7 +112,7 @@ where
 
 impl<T> Flasher<T>
 where
-    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
 {
     /// basic constructor
     pub fn new(interface: T) -> Self {
@@ -121,5 +121,9 @@ where
     /// Get all storage decies with intoformation
     pub async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
         self.interface.list_devices().await
+    }
+    /// get async the storage devices
+    pub async fn watch_devices(&self) -> FlashResult<<T as AsyncDeviceEnumerator>::WatchStream> {
+        self.interface.watch_devices().await
     }
 }
