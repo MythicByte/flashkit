@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::{
         Seek,
         SeekFrom,
@@ -28,13 +29,16 @@ use rustix::{
         RecvFlags,
     },
 };
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
+    data_types::DeviceEvent,
     error::{
         FlashError,
         FlashResult,
     },
     traits::{
+        AsyncDeviceEnumerator,
         DeviceEjector,
         DeviceEnumerator,
         DeviceUnmounter,
@@ -43,7 +47,7 @@ use crate::{
     },
 };
 #[allow(missing_docs)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DarwinInterface;
 
 #[allow(missing_docs)]
@@ -357,4 +361,69 @@ fn recv_fd_from_authopen(pipe: BorrowedFd<'_>) -> FlashResult<OwnedFd> {
     Err(FlashError::FilesystemError(
         "authopen: control message absent — no file descriptor received".into(),
     ))
+}
+impl AsyncDeviceEnumerator for DarwinInterface {
+    type WatchStream = ReceiverStream<DeviceEvent>;
+
+    async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+        // 1. Establish the identical uniform baseline snapshot instantly
+        let initial_devices = self.list_devices().await?;
+        let mut known_paths: HashSet<PathBuf> = HashSet::new();
+
+        for dev in initial_devices {
+            known_paths.insert(dev.path.clone());
+            if tx.send(DeviceEvent::Added(dev)).await.is_err() {
+                return Ok(ReceiverStream::new(rx));
+            }
+        }
+
+        let enumerator = self.clone();
+
+        // 2. Spawn the asynchronous polling diff engine
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            // Missed ticks are skipped because we explicitly poll on a fixed clock
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                // Query the updated hardware state via your existing diskutil parser
+                let current_devices = match enumerator.list_devices().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!("macOS device watcher failed to list devices: {e}");
+                        continue;
+                    }
+                };
+
+                let current_paths: HashSet<PathBuf> =
+                    current_devices.iter().map(|d| d.path.clone()).collect();
+
+                // Check for insertions
+                for dev in current_devices {
+                    if known_paths.insert(dev.path.clone()) {
+                        if tx.send(DeviceEvent::Added(dev)).await.is_err() {
+                            return; // Consumer dropped the stream receiver, exit task safely
+                        }
+                    }
+                }
+
+                // Check for removals
+                let dead_paths: Vec<PathBuf> =
+                    known_paths.difference(&current_paths).cloned().collect();
+
+                for path in dead_paths {
+                    known_paths.remove(&path);
+                    if tx.send(DeviceEvent::Removed(path)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(ReceiverStream::new(rx))
+    }
 }
