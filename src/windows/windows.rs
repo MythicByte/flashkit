@@ -1,12 +1,17 @@
 use crate::{
-    data_types::BlockDevice,
+    data_types::{
+        BlockDevice,
+        DeviceEvent,
+    },
     error::{
         FlashError,
         FlashResult,
     },
+    traits::AsyncDeviceEnumerator,
 };
 use serde::Deserialize;
 use std::{
+    collections::HashSet,
     io::{
         Seek,
         SeekFrom,
@@ -22,6 +27,7 @@ use std::{
         PathBuf,
     },
 };
+use tokio_stream::wrappers::ReceiverStream;
 use windows::{
     Win32::{
         Foundation::{
@@ -144,6 +150,7 @@ pub struct WindowsRawWriteHandle {
     sector_size: usize,
     size_bytes: u64,
 }
+
 impl RawWriteHandle for WindowsRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
         self.file
@@ -671,4 +678,95 @@ fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<
     }
 
     Some(vol_letters)
+}
+impl AsyncDeviceEnumerator for WindowsInterface {
+    type WatchStream = ReceiverStream<DeviceEvent>;
+
+    async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        //  Fetch current devices and send them immediately
+        let initial_devices = self.list_devices().await?;
+
+        for dev in initial_devices.clone() {
+            if tx.send(DeviceEvent::Added(dev)).await.is_err() {
+                return Ok(ReceiverStream::new(rx));
+            }
+        }
+
+        let enumerator = self.clone();
+
+        tokio::spawn(async move {
+            let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            tokio::task::spawn_blocking(move || {
+                let wmi_con = match WMIConnection::new() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("WMI connection failed: {e}");
+                        return;
+                    }
+                };
+
+                // Query listens for creations, deletions, and modifications of Disk Drives
+                let query = "SELECT * FROM __InstanceOperationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_DiskDrive'";
+
+                let iterator = match wmi_con.exec_notification_query(query) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        tracing::error!("WMI query failed: {e}");
+                        return;
+                    }
+                };
+
+                // Iterate over notifications natively provided by the crate
+                for _event in iterator {
+                    if wake_tx.send(()).is_err() {
+                        break; // The receiver was dropped, shut down the thread
+                    }
+                }
+            });
+
+            let mut known_paths: HashSet<PathBuf> =
+                initial_devices.into_iter().map(|d| d.path).collect();
+
+            while wake_rx.recv().await.is_some() {
+                // A slight delay ensures Windows Volume Manager finishes mounting operations
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+
+                // Re-scan active drives
+                let current_devices = match enumerator.list_devices().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!("Failed to re-enumerate devices during WMI wake: {e}");
+                        continue;
+                    }
+                };
+
+                let current_paths: HashSet<PathBuf> =
+                    current_devices.iter().map(|d| d.path.clone()).collect();
+
+                // Check for new devices
+                for dev in current_devices {
+                    if !known_paths.contains(&dev.path) {
+                        known_paths.insert(dev.path.clone());
+                        if tx.send(DeviceEvent::Added(dev)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+
+                // Check for removed devices
+                let removed_paths: Vec<PathBuf> =
+                    known_paths.difference(&current_paths).cloned().collect();
+                for path in removed_paths {
+                    known_paths.remove(&path);
+                    if tx.send(DeviceEvent::Removed(path)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(ReceiverStream::new(rx))
+    }
 }
