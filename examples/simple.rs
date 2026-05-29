@@ -14,7 +14,6 @@ use tracing_subscriber::{
 async fn main() {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
-        .with_span_events(FmtSpan::FULL)
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("Tracing Subscriber failed to setup");
