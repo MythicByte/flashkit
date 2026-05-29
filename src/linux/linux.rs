@@ -4,7 +4,14 @@ use std::{
         Seek,
         SeekFrom,
     },
-    path::Path,
+    path::{
+        Path,
+        PathBuf,
+    },
+};
+use tokio_stream::{
+    StreamExt,
+    wrappers::ReceiverStream,
 };
 
 use zbus::zvariant::{
@@ -17,12 +24,16 @@ use zvariant::{
 };
 
 use crate::{
-    data_types::BlockDevice,
+    data_types::{
+        BlockDevice,
+        DeviceEvent,
+    },
     error::{
         FlashError,
         FlashResult,
     },
     traits::{
+        AsyncDeviceEnumerator,
         DeviceEjector,
         DeviceEnumerator,
         DeviceUnmounter,
@@ -98,7 +109,29 @@ trait UDisks2Filesystem {
         options: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
     ) -> zbus::Result<()>;
 }
+#[zbus::proxy(
+    interface = "org.freedesktop.DBus.ObjectManager",
+    default_service = "org.freedesktop.UDisks2",
+    default_path = "/org/freedesktop/UDisks2"
+)]
+trait UDisks2ObjectManager {
+    #[zbus(signal)]
+    fn interfaces_added(
+        &self,
+        object_path: zbus::zvariant::ObjectPath<'_>,
+        interfaces_and_properties: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        >,
+    ) -> zbus::Result<()>;
 
+    #[zbus(signal)]
+    fn interfaces_removed(
+        &self,
+        object_path: zbus::zvariant::ObjectPath<'_>,
+        interfaces: Vec<String>,
+    ) -> zbus::Result<()>;
+}
 /// Linux a connection to the d bus system bus
 #[derive(Debug, Clone)]
 pub struct LinuxDBus {
@@ -110,6 +143,93 @@ impl LinuxDBus {
     pub async fn new() -> FlashResult<Self> {
         let connection = zbus::Connection::system().await?;
         Ok(Self { connection })
+    }
+}
+impl AsyncDeviceEnumerator for LinuxDBus {
+    type WatchStream = ReceiverStream<DeviceEvent>;
+    async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let manager = UDisks2ObjectManagerProxy::new(&self.connection).await?;
+
+        let mut added_stream = manager.receive_interfaces_added().await?;
+        let mut removed_stream = manager.receive_interfaces_removed().await?;
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                                    // 1. Handle newly connected devices
+                Some(added) = added_stream.next() => {
+                    let added_args = match added.args().map_err(FlashError::from)?;
+                                        if let Some(block_props) = added_args.interfaces_and_properties.get("org.freedesktop.UDisks2.Block") {
+                                            // Extract the raw system path string from the "Device" byte array property (ay)
+                                            if let Some(device_val) = block_props.get("Device") {
+                                                if let Ok(device_bytes) = <Vec<u8>>::try_from(device_val.clone()) {
+                                                    let path_str = String::from_utf8_lossy(&device_bytes).trim_matches('\0').to_string();
+                                                    let path = PathBuf::from(path_str);
+
+                                                    // Extract device capacity size (t -> u64)
+                                                    let size_bytes = block_props.get("Size")
+                                                        .and_then(|v| u64::try_from(v.clone()).ok())
+                                                        .unwrap_or(0);
+
+                                                    // Extract if the device is removable (b -> bool)
+                                                    let is_removable = block_props.get("HintRemovable")
+                                                        .and_then(|v| bool::try_from(v.clone()).ok())
+                                                        .unwrap_or(false);
+
+                                                    // Extract hardware sector size property (u -> u32) dynamically from D-Bus
+                                                    let sector_size = block_props.get("HwSectorSize")
+                                                        .and_then(|v| u32::try_from(v.clone()).ok())
+                                                        .map(|s| s as usize)
+                                                        .unwrap_or(512); // Fallback if property is missing
+
+                                                    // Extract human-readable label (s -> String), fallback to device filename
+                                                    let name = block_props.get("IdLabel")
+                                                        .and_then(|v| <String>::try_from(v.clone()).ok())
+                                                        .filter(|s| !s.is_empty())
+                                                        .unwrap_or_else(|| {
+                                                            path.file_name()
+                                                                .map(|n| n.to_string_lossy().into_owned())
+                                                                .unwrap_or_else(|| "Generic Drive".to_string())
+                                                        });
+
+                                                    let device = BlockDevice {
+                                                        path,
+                                                        name,
+                                                        size_bytes,
+                                                        is_removable,
+                                                        sector_size,
+                                                    };
+
+                                                    if tx.send(DeviceEvent::Added(device)).await.is_err() {
+                                                        return; // Target receiver was dropped, terminate task
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // 2. Handle disconnected devices
+                                    Some(removed) = removed_stream.next() => {
+                                        let removed_args = removed.args().map_err(FlashError::from)?;
+                                        if removed_args.interfaces.iter().any(|i| i == "org.freedesktop.UDisks2.Block") {
+                                            // UDisks2 object paths match this pattern: "/org/freedesktop/UDisks2/block_devices/sdb"
+                                            // Extract the last component ("sdb") to rebuild the system path ("/dev/sdb")
+                                            let object_path_str = removed.object_path.as_str();
+                                            if let Some(filename) = object_path_str.split('/').last() {
+                                                let sys_path = PathBuf::from(format!("/dev/{}", filename));
+
+                                                if tx.send(DeviceEvent::Removed(sys_path)).await.is_err() {
+                                                    return; // Target receiver was dropped, terminate task
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                }
+            }
+        });
+
+        Ok(ReceiverStream::new(rx))
     }
 }
 impl DeviceEnumerator for LinuxDBus {

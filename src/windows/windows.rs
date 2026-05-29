@@ -144,7 +144,6 @@ pub struct WindowsRawWriteHandle {
     sector_size: usize,
     size_bytes: u64,
 }
-
 impl RawWriteHandle for WindowsRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
         self.file
