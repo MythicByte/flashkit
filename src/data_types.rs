@@ -80,10 +80,10 @@ pub enum HashFailedWhen {
 #[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Size {
-    Bytes(u64),
-    KiloByte(u64),
-    MegaByte(u64),
-    GigaByte(u64),
+    Bytes(f64),
+    KiloByte(f64),
+    MegaByte(f64),
+    GigaByte(f64),
 }
 /// Events to devices
 #[allow(missing_docs)]
@@ -246,14 +246,20 @@ impl Default for FlashProgress {
 /// generates from bytes rounded biggest value
 #[must_use]
 pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    const GB: f64 = 1024.0 * MB;
 
-    match bytes_size {
-        b if b >= GB => Size::GigaByte(b.div_ceil(GB)),
-        b if b >= MB => Size::MegaByte(b.div_ceil(MB)),
-        b if b >= KB => Size::KiloByte(b.div_ceil(KB)),
-        b => Size::Bytes(b),
+    // Convert to f64 immediately to protect precision during calculations
+    let bytes = bytes_size as f64;
+
+    if bytes >= 0.1 * GB {
+        Size::GigaByte(bytes / GB)
+    } else if bytes >= 0.1 * MB {
+        Size::MegaByte(bytes / MB)
+    } else if bytes >= 0.1 * KB {
+        Size::KiloByte(bytes / KB)
+    } else {
+        Size::Bytes(bytes)
     }
 }
