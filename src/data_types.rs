@@ -246,18 +246,17 @@ impl Default for FlashProgress {
 /// generates from bytes rounded biggest value
 #[must_use]
 pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * KB;
-    const GB: f64 = 1024.0 * MB;
+    const KB: f64 = 1000.0;
+    const MB: f64 = 1000.0 * KB;
+    const GB: f64 = 1000.0 * MB;
 
-    // Convert to f64 immediately to protect precision during calculations
     let bytes = bytes_size as f64;
 
-    if bytes >= 0.1 * GB {
+    if bytes >= GB {
         Size::GigaByte(bytes / GB)
-    } else if bytes >= 0.1 * MB {
+    } else if bytes >= MB {
         Size::MegaByte(bytes / MB)
-    } else if bytes >= 0.1 * KB {
+    } else if bytes >= KB {
         Size::KiloByte(bytes / KB)
     } else {
         Size::Bytes(bytes)
