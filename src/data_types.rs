@@ -87,7 +87,7 @@ pub enum Size {
 }
 /// Events to devices
 #[allow(missing_docs)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DeviceEvent {
     Added(BlockDevice),
     Removed(PathBuf),
