@@ -188,6 +188,7 @@ where
                 bytes_since_last_report = 0;
                 timer = std::time::Instant::now();
             }
+            tokio::task::yield_now().await;
         }
         on_progress
             .send(FlashProgress::create(FlashPhase::Flushing))
@@ -262,8 +263,8 @@ where
                     .map_err(|_| FlashError::SendChannelError)?;
                 tmp_counter = 0;
                 timer = std::time::Instant::now();
-                tokio::task::yield_now().await;
             }
+            tokio::task::yield_now().await;
         }
 
         let actual = hasher.finalize();
