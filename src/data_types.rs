@@ -226,10 +226,10 @@ impl FlashProgress {
 impl Display for Size {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Size::Bytes(x) => write!(f, "{} B", x),
-            Size::KiloByte(x) => write!(f, "{} KB", x),
-            Size::MegaByte(x) => write!(f, "{} MB", x),
-            Size::GigaByte(x) => write!(f, "{} GB", x),
+            Size::Bytes(x) => write!(f, "{:.1} B", x),
+            Size::KiloByte(x) => write!(f, "{:.1} KB", x),
+            Size::MegaByte(x) => write!(f, "{:.1} MB", x),
+            Size::GigaByte(x) => write!(f, "{:.1} GB", x),
         }
     }
 }
