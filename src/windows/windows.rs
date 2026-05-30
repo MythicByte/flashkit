@@ -1,12 +1,17 @@
 use crate::{
-    data_types::BlockDevice,
+    data_types::{
+        BlockDevice,
+        DeviceEvent,
+    },
     error::{
         FlashError,
         FlashResult,
     },
+    traits::AsyncDeviceEnumerator,
 };
 use serde::Deserialize;
 use std::{
+    collections::HashSet,
     io::{
         Seek,
         SeekFrom,
@@ -22,6 +27,7 @@ use std::{
         PathBuf,
     },
 };
+use tokio_stream::wrappers::ReceiverStream;
 use windows::{
     Win32::{
         Foundation::{
@@ -47,6 +53,7 @@ use windows::{
             IO::DeviceIoControl,
             Ioctl::{
                 FSCTL_DISMOUNT_VOLUME,
+                FSCTL_LOCK_VOLUME,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
@@ -336,7 +343,7 @@ fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
 
         // Per-volume errors are absorbed here.  A locked or inaccessible
         // volume should not abort the whole unmount operation.
-        process_single_volume(&guid_path, target_number);
+        process_single_volume(&guid_path, target_number)?;
 
         // Advance the cursor.  When there are no more volumes,
         // `FindNextVolumeW` signals ERROR_NO_MORE_FILES and we stop.
@@ -477,58 +484,38 @@ fn decode_wide_nul_string(buf: &[u16]) -> String {
 /// If `guid_path` belongs to the drive numbered `target_number`, remove all
 /// its mount points and dismount its filesystem.  Errors are absorbed: an
 /// inaccessible or already-unmounted volume is silently skipped.
-fn process_single_volume(guid_path: &str, target_number: u32) {
-    // CreateFileW requires the path without the trailing backslash.
+fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()> {
     let device_path = guid_path.trim_end_matches('\\');
     let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
 
-    // ── open with zero desired-access and check which physical drive
-    //            this volume lives on.
-    //
-    // Zero desired-access is enough to send an IOCTL.  Think of an IOCTL as a
-    // typed question sent to a device driver: here we ask
-    // "what physical drive number are you on?"
-    let Ok(query_handle) = (unsafe {
+    //  Open query handle to check device matching
+    let query_handle = unsafe {
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
-            0, // zero desired-access: query-only, no read or write
+            0,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
             None,
         )
-    }) else {
-        return; // volume not accessible (already removed, etc.); skip it
-    };
-
-    // The guard closes `query_handle` when it leaves scope.
-    let query_guard = AutoCloseHandle(query_handle);
+    }
+    .map_err(|e| FlashError::FilesystemError(format!("Failed to query volume attributes: {e}")))?;
 
     let is_match = storage_device_number(query_handle) == Some(target_number);
-
-    // Done querying; release the handle early.
-    drop(query_guard);
-
-    if !is_match {
-        return;
+    unsafe {
+        let _ = CloseHandle(query_handle); // Safely ignored
     }
 
-    // ──  detach all drive letters and directory junctions.
-    //
-    // A "mount point" is any name through which users reach this volume —
-    // the most common form is a drive letter like `D:\`, but Windows also
-    // supports mounting volumes at arbitrary directory paths.
+    if !is_match {
+        return Ok(());
+    }
+
+    //  Clear out drive letters/mount points
     remove_mount_points(guid_path);
 
-    // ── Step 3: open with write access and flush/lock the filesystem.
-    //
-    // FSCTL_DISMOUNT_VOLUME tells the filesystem driver to write any
-    // pending data to disk and mark itself as cleanly unmounted.  After
-    // this call the volume still exists in the OS's internal table, but
-    // its filesystem is no longer active — exactly what we need before
-    // writing a raw disk image over the underlying device.
-    let Ok(write_handle) = (unsafe {
+    //  Open handle with Write privileges to issue locks/dismounts
+    let write_handle = unsafe {
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
@@ -538,15 +525,35 @@ fn process_single_volume(guid_path: &str, target_number: u32) {
             FILE_FLAGS_AND_ATTRIBUTES(0),
             None,
         )
-    }) else {
-        return;
-    };
-
-    // write_guard (no underscore) signals: this binding is intentionally kept
-    // alive to close write_handle at end of scope — it is not an unused value.
-    let write_guard = AutoCloseHandle(write_handle);
+    }.map_err(|e| {
+        FlashError::FilesystemError(format!(
+            "Access denied or sharing violation opening volume for write. Ensure app is running as ADMIN: {e}"
+        ))
+    })?;
 
     let mut bytes_returned = 0u32;
+
+    //  CRITICAL: Lock the volume first to prevent the OS from immediately remounting it
+    unsafe {
+        DeviceIoControl(
+            write_handle,
+            FSCTL_LOCK_VOLUME,
+            None,
+            0,
+            None,
+            0,
+            Some(&mut bytes_returned),
+            None,
+        )
+    }
+    .map_err(|e| {
+        unsafe {
+            let _ = CloseHandle(write_handle);
+        }
+        FlashError::FilesystemError(format!("Failed to lock volume (files may be in use): {e}"))
+    })?;
+
+    //  Explicitly dismount the volume
     unsafe {
         DeviceIoControl(
             write_handle,
@@ -558,10 +565,21 @@ fn process_single_volume(guid_path: &str, target_number: u32) {
             Some(&mut bytes_returned),
             None,
         )
-        .ok(); // best-effort: already-gone volumes are fine
+    }
+    .map_err(|e| {
+        unsafe {
+            let _ = CloseHandle(write_handle);
+        }
+        FlashError::FilesystemError(format!("Failed to dismount volume: {e}"))
+    })?;
+
+    // NOTE: Keep 'write_handle' alive or store it during your flashing operation.
+    // Closing 'write_handle' releases the volume lock, which can cause Windows to remount it.
+    unsafe {
+        let _ = CloseHandle(write_handle);
     }
 
-    drop(write_guard); // explicit for clarity; would also drop at end of scope
+    Ok(())
 }
 /// Query the system for all mount points (drive letters or paths)
 /// associated with a specific physical drive number.
@@ -672,4 +690,95 @@ fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<
     }
 
     Some(vol_letters)
+}
+impl AsyncDeviceEnumerator for WindowsInterface {
+    type WatchStream = ReceiverStream<DeviceEvent>;
+
+    async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        //  Fetch current devices and send them immediately
+        let initial_devices = self.list_devices().await?;
+
+        for dev in initial_devices.clone() {
+            if tx.send(DeviceEvent::Added(dev)).await.is_err() {
+                return Ok(ReceiverStream::new(rx));
+            }
+        }
+
+        let enumerator = self.clone();
+
+        tokio::spawn(async move {
+            let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            tokio::task::spawn_blocking(move || {
+                let wmi_con = match WMIConnection::new() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("WMI connection failed: {e}");
+                        return;
+                    }
+                };
+
+                // Query listens for creations, deletions, and modifications of Disk Drives
+                let query = "SELECT * FROM __InstanceOperationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_DiskDrive'";
+
+                let iterator = match wmi_con.exec_notification_query(query) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        tracing::error!("WMI query failed: {e}");
+                        return;
+                    }
+                };
+
+                // Iterate over notifications natively provided by the crate
+                for _event in iterator {
+                    if wake_tx.send(()).is_err() {
+                        break; // The receiver was dropped, shut down the thread
+                    }
+                }
+            });
+
+            let mut known_paths: HashSet<PathBuf> =
+                initial_devices.into_iter().map(|d| d.path).collect();
+
+            while wake_rx.recv().await.is_some() {
+                // A slight delay ensures Windows Volume Manager finishes mounting operations
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+
+                // Re-scan active drives
+                let current_devices = match enumerator.list_devices().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!("Failed to re-enumerate devices during WMI wake: {e}");
+                        continue;
+                    }
+                };
+
+                let current_paths: HashSet<PathBuf> =
+                    current_devices.iter().map(|d| d.path.clone()).collect();
+
+                // Check for new devices
+                for dev in current_devices {
+                    if !known_paths.contains(&dev.path) {
+                        known_paths.insert(dev.path.clone());
+                        if tx.send(DeviceEvent::Added(dev)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+
+                // Check for removed devices
+                let removed_paths: Vec<PathBuf> =
+                    known_paths.difference(&current_paths).cloned().collect();
+                for path in removed_paths {
+                    known_paths.remove(&path);
+                    if tx.send(DeviceEvent::Removed(path)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(ReceiverStream::new(rx))
+    }
 }

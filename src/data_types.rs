@@ -80,14 +80,14 @@ pub enum HashFailedWhen {
 #[allow(missing_docs)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Size {
-    Bytes(u64),
-    KiloByte(u64),
-    MegaByte(u64),
-    GigaByte(u64),
+    Bytes(f64),
+    KiloByte(f64),
+    MegaByte(f64),
+    GigaByte(f64),
 }
 /// Events to devices
 #[allow(missing_docs)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DeviceEvent {
     Added(BlockDevice),
     Removed(PathBuf),
@@ -226,10 +226,10 @@ impl FlashProgress {
 impl Display for Size {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Size::Bytes(x) => write!(f, "{} B", x),
-            Size::KiloByte(x) => write!(f, "{} KB", x),
-            Size::MegaByte(x) => write!(f, "{} MB", x),
-            Size::GigaByte(x) => write!(f, "{} GB", x),
+            Size::Bytes(x) => write!(f, "{:.1} B", x),
+            Size::KiloByte(x) => write!(f, "{:.1} KB", x),
+            Size::MegaByte(x) => write!(f, "{:.1} MB", x),
+            Size::GigaByte(x) => write!(f, "{:.1} GB", x),
         }
     }
 }
@@ -246,14 +246,19 @@ impl Default for FlashProgress {
 /// generates from bytes rounded biggest value
 #[must_use]
 pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
+    const KB: f64 = 1000.0;
+    const MB: f64 = 1000.0 * KB;
+    const GB: f64 = 1000.0 * MB;
 
-    match bytes_size {
-        b if b >= GB => Size::GigaByte(b.div_ceil(GB)),
-        b if b >= MB => Size::MegaByte(b.div_ceil(MB)),
-        b if b >= KB => Size::KiloByte(b.div_ceil(KB)),
-        b => Size::Bytes(b),
+    let bytes = bytes_size as f64;
+
+    if bytes >= GB {
+        Size::GigaByte(bytes / GB)
+    } else if bytes >= MB {
+        Size::MegaByte(bytes / MB)
+    } else if bytes >= KB {
+        Size::KiloByte(bytes / KB)
+    } else {
+        Size::Bytes(bytes)
     }
 }

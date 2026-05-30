@@ -26,6 +26,7 @@ use crate::{
         FlashResult,
     },
     traits::{
+        AsyncDeviceEnumerator,
         DeviceEjector,
         DeviceEnumerator,
         DeviceUnmounter,
@@ -38,7 +39,7 @@ use crate::{
 
 impl<T> FlasherGeneric<T> for Flasher<T>
 where
-    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
 {
     /// flash async versions
     async fn flash(
@@ -187,6 +188,7 @@ where
                 bytes_since_last_report = 0;
                 timer = std::time::Instant::now();
             }
+            tokio::task::yield_now().await;
         }
         on_progress
             .send(FlashProgress::create(FlashPhase::Flushing))
@@ -261,8 +263,8 @@ where
                     .map_err(|_| FlashError::SendChannelError)?;
                 tmp_counter = 0;
                 timer = std::time::Instant::now();
-                tokio::task::yield_now().await;
             }
+            tokio::task::yield_now().await;
         }
 
         let actual = hasher.finalize();
@@ -281,7 +283,7 @@ where
 }
 impl<T> Flasher<T>
 where
-    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector,
+    T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
 {
     async fn wipe_partition_table(handle: &mut T::Handle) -> FlashResult<()>
     where
