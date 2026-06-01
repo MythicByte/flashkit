@@ -175,12 +175,9 @@ impl AsyncDeviceEnumerator for LinuxDBus {
 }
 async fn linux_watcher_task(
     conn: zbus::Connection,
-    // Paths already known at subscription time; used to suppress
-    // spurious Added events from InterfacesAdded races on startup.
     already_known: std::collections::HashSet<PathBuf>,
     tx: tokio::sync::mpsc::Sender<DeviceEvent>,
 ) -> FlashResult<()> {
-    // FIX: Instantiate the D-Bus object manager proxy
     let proxy = UDisks2ObjectManagerProxy::new(&conn).await?;
     let mut added_stream = proxy.receive_interfaces_added().await?;
     let mut removed_stream = proxy.receive_interfaces_removed().await?;
