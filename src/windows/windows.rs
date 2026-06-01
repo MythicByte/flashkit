@@ -37,7 +37,8 @@ use windows::{
         Storage::FileSystem::{
             CreateFileW,
             DeleteVolumeMountPointW,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAG_NO_BUFFERING,
+            FILE_FLAG_WRITE_THROUGH,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
@@ -76,6 +77,7 @@ use crate::traits::{
 };
 
 /// Closes any file or device HANDLE on drop.
+#[derive(Debug)]
 struct AutoCloseHandle(HANDLE);
 
 impl Drop for AutoCloseHandle {
@@ -87,12 +89,18 @@ impl Drop for AutoCloseHandle {
         }
     }
 }
+// SAFETY: Windows HANDLEs are valid to send across threads and access from
+// multiple threads.  The OS itself is responsible for synchronising access
+// to the underlying kernel object.
+unsafe impl Send for AutoCloseHandle {}
+unsafe impl Sync for AutoCloseHandle {}
 
 /// Owns a `FindFirstVolumeW` enumeration cursor and closes it on drop.
 ///
 /// The raw HANDLE is kept private; all access goes through the typed methods
 /// below.  This prevents the Copy-able raw value from "escaping" and being
 /// used independently of its owner.
+#[derive(Debug)]
 struct VolumeFindHandle(HANDLE);
 
 impl VolumeFindHandle {
@@ -150,6 +158,10 @@ pub struct WindowsRawWriteHandle {
     file: std::fs::File,
     sector_size: usize,
     size_bytes: u64,
+    /// Keeps the FSCTL_LOCK_VOLUME handles alive for every volume on this
+    /// physical drive.  Dropping them releases the locks and lets Windows
+    /// remount the filesystems, so they must outlive every write/flush.
+    _volume_locks: Vec<AutoCloseHandle>,
 }
 
 impl RawWriteHandle for WindowsRawWriteHandle {
@@ -199,9 +211,20 @@ impl DeviceWriter for WindowsInterface {
         let size_bytes = device.size_bytes;
 
         tokio::task::spawn_blocking(move || -> FlashResult<WindowsRawWriteHandle> {
+            // Acquire and hold volume locks BEFORE opening the write handle.
+            // unmount_volumes_on_drive_locked returns the lock handles; as long as
+            // they stay alive inside WindowsRawWriteHandle, Windows cannot remount
+            // the filesystem and interrupt our writes mid-flash.
+            let volume_locks = unmount_volumes_on_drive_locked(&path)?;
+
             let path_str = path.to_string_lossy().to_string();
             let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
+            // FILE_FLAG_NO_BUFFERING: bypasses the Windows cache manager.
+            //   Mandatory for raw sector-aligned writes to a physical drive.
+            // FILE_FLAG_WRITE_THROUGH: data goes straight to the device without
+            //   sitting in the write-back cache, matching Linux O_DIRECT | O_SYNC.
+            let flags = FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH;
             let handle = unsafe {
                 CreateFileW(
                     PCWSTR(wide.as_ptr()),
@@ -209,7 +232,7 @@ impl DeviceWriter for WindowsInterface {
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     None,
                     OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
+                    flags,
                     None,
                 )
                 .map_err(FlashError::WindowsError)?
@@ -222,6 +245,7 @@ impl DeviceWriter for WindowsInterface {
                 file,
                 sector_size,
                 size_bytes,
+                _volume_locks: volume_locks,
             })
         })
         .await
@@ -329,31 +353,41 @@ impl DeviceUnmounter for WindowsInterface {
 }
 
 fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
+    // Delegate to the locking variant and drop the handles immediately.
+    // Used by eject() which does not need to hold the lock afterwards.
+    unmount_volumes_on_drive_locked(physical_path).map(|_| ())
+}
+
+/// Dismount every volume on `physical_path` and **return the lock handles**.
+///
+/// The caller must keep the returned `Vec<AutoCloseHandle>` alive for the
+/// entire flash operation.  Dropping them releases `FSCTL_LOCK_VOLUME` and
+/// lets Windows remount the filesystems, corrupting mid-flash writes.
+fn unmount_volumes_on_drive_locked(physical_path: &Path) -> FlashResult<Vec<AutoCloseHandle>> {
     const VOLUME_GUID_BUF_LEN: usize = 64;
     let mut vol_buf = vec![0u16; VOLUME_GUID_BUF_LEN];
 
     let target_number = physical_drive_number(physical_path)?;
 
-    // Start enumeration.  The guard calls `FindVolumeClose` when it drops,
-    // regardless of how this function exits.
+    // The guard calls `FindVolumeClose` when it drops.
     let finder = VolumeFindHandle::start(&mut vol_buf)?;
+    let mut locks: Vec<AutoCloseHandle> = Vec::new();
 
     loop {
         let guid_path = decode_wide_nul_string(&vol_buf);
 
-        // Per-volume errors are absorbed here.  A locked or inaccessible
-        // volume should not abort the whole unmount operation.
-        process_single_volume(&guid_path, target_number)?;
+        // Returns the lock handle for matching volumes; None = different drive.
+        if let Some(lock) = process_single_volume(&guid_path, target_number)? {
+            locks.push(lock);
+        }
 
-        // Advance the cursor.  When there are no more volumes,
-        // `FindNextVolumeW` signals ERROR_NO_MORE_FILES and we stop.
         vol_buf.fill(0);
         if !finder.advance(&mut vol_buf) {
             break;
         }
     }
 
-    Ok(())
+    Ok(locks)
 }
 
 /// Parse the drive number from a path like `\\.\PhysicalDrive2` → `2`.
@@ -482,13 +516,22 @@ fn decode_wide_nul_string(buf: &[u16]) -> String {
 // calls needed.
 
 /// If `guid_path` belongs to the drive numbered `target_number`, remove all
-/// its mount points and dismount its filesystem.  Errors are absorbed: an
-/// inaccessible or already-unmounted volume is silently skipped.
-fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()> {
+/// its mount points, lock it, and dismount its filesystem.
+///
+/// Returns `Some(AutoCloseHandle)` — the **lock handle** — when the volume
+/// matches and was successfully locked.  The caller must keep this handle
+/// alive for the duration of the flash; dropping it releases
+/// `FSCTL_LOCK_VOLUME` and lets Windows remount the filesystem.
+///
+/// Returns `None` when the volume belongs to a different drive (not an error).
+fn process_single_volume(
+    guid_path: &str,
+    target_number: u32,
+) -> FlashResult<Option<AutoCloseHandle>> {
     let device_path = guid_path.trim_end_matches('\\');
     let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
 
-    //  Open query handle to check device matching
+    // Open a zero-access handle just to read the physical device number.
     let query_handle = unsafe {
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
@@ -501,20 +544,20 @@ fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()>
         )
     }
     .map_err(|e| FlashError::FilesystemError(format!("Failed to query volume attributes: {e}")))?;
+    let query_guard = AutoCloseHandle(query_handle);
 
     let is_match = storage_device_number(query_handle) == Some(target_number);
-    unsafe {
-        let _ = CloseHandle(query_handle); // Safely ignored
-    }
+    drop(query_guard); // close the read-only handle before we open for writing
 
     if !is_match {
-        return Ok(());
+        return Ok(None);
     }
 
-    //  Clear out drive letters/mount points
+    // Remove drive letters / mount points so the OS stops using the volume.
     remove_mount_points(guid_path);
 
-    //  Open handle with Write privileges to issue locks/dismounts
+    // Open a write handle.  We must keep this handle open: it is what
+    // FSCTL_LOCK_VOLUME is bound to.  Closing it releases the lock.
     let write_handle = unsafe {
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
@@ -525,15 +568,19 @@ fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()>
             FILE_FLAGS_AND_ATTRIBUTES(0),
             None,
         )
-    }.map_err(|e| {
+    }
+    .map_err(|e| {
         FlashError::FilesystemError(format!(
-            "Access denied or sharing violation opening volume for write. Ensure app is running as ADMIN: {e}"
+            "Access denied or sharing violation opening volume for write.              Ensure the app is running as Administrator: {e}"
         ))
     })?;
+    // Wrap immediately so the handle is closed on any early return below.
+    let lock_guard = AutoCloseHandle(write_handle);
 
     let mut bytes_returned = 0u32;
 
-    //  CRITICAL: Lock the volume first to prevent the OS from immediately remounting it
+    // Lock the volume.  This prevents the Volume Manager from remounting it
+    // while we hold the handle open.
     unsafe {
         DeviceIoControl(
             write_handle,
@@ -547,13 +594,10 @@ fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()>
         )
     }
     .map_err(|e| {
-        unsafe {
-            let _ = CloseHandle(write_handle);
-        }
         FlashError::FilesystemError(format!("Failed to lock volume (files may be in use): {e}"))
     })?;
 
-    //  Explicitly dismount the volume
+    // Dismount the filesystem so it cannot be accessed by any driver.
     unsafe {
         DeviceIoControl(
             write_handle,
@@ -566,20 +610,12 @@ fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()>
             None,
         )
     }
-    .map_err(|e| {
-        unsafe {
-            let _ = CloseHandle(write_handle);
-        }
-        FlashError::FilesystemError(format!("Failed to dismount volume: {e}"))
-    })?;
+    .map_err(|e| FlashError::FilesystemError(format!("Failed to dismount volume: {e}")))?;
 
-    // NOTE: Keep 'write_handle' alive or store it during your flashing operation.
-    // Closing 'write_handle' releases the volume lock, which can cause Windows to remount it.
-    unsafe {
-        let _ = CloseHandle(write_handle);
-    }
-
-    Ok(())
+    // Return the guard — DO NOT drop it here.  The caller stores it in
+    // WindowsRawWriteHandle._volume_locks so the lock survives until after
+    // the final flush.
+    Ok(Some(lock_guard))
 }
 /// Query the system for all mount points (drive letters or paths)
 /// associated with a specific physical drive number.
