@@ -37,8 +37,7 @@ use windows::{
         Storage::FileSystem::{
             CreateFileW,
             DeleteVolumeMountPointW,
-            FILE_FLAG_NO_BUFFERING,
-            FILE_FLAG_WRITE_THROUGH,
+            FILE_ATTRIBUTE_NORMAL,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
@@ -210,46 +209,37 @@ impl DeviceWriter for WindowsInterface {
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
 
-        tokio::task::spawn_blocking(move || -> FlashResult<WindowsRawWriteHandle> {
-            // Acquire and hold volume locks BEFORE opening the write handle.
-            // unmount_volumes_on_drive_locked returns the lock handles; as long as
-            // they stay alive inside WindowsRawWriteHandle, Windows cannot remount
-            // the filesystem and interrupt our writes mid-flash.
-            let volume_locks = unmount_volumes_on_drive_locked(&path)?;
+        // Acquire and hold volume locks BEFORE opening the write handle.
+        // unmount_volumes_on_drive_locked returns the lock handles; as long as
+        // they stay alive inside WindowsRawWriteHandle, Windows cannot remount
+        // the filesystem and interrupt our writes mid-flash.
+        let volume_locks = unmount_volumes_on_drive_locked(&path)?;
 
-            let path_str = path.to_string_lossy().to_string();
-            let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let path_str = path.to_string_lossy().to_string();
+        let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
-            // FILE_FLAG_NO_BUFFERING: bypasses the Windows cache manager.
-            //   Mandatory for raw sector-aligned writes to a physical drive.
-            // FILE_FLAG_WRITE_THROUGH: data goes straight to the device without
-            //   sitting in the write-back cache, matching Linux O_DIRECT | O_SYNC.
-            let flags = FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH;
-            let handle = unsafe {
-                CreateFileW(
-                    PCWSTR(wide.as_ptr()),
-                    (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    None,
-                    OPEN_EXISTING,
-                    flags,
-                    None,
-                )
-                .map_err(FlashError::WindowsError)?
-            };
-            if handle.is_invalid() {
-                return Err(FlashError::SyncError);
-            }
-            let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
-            Ok(WindowsRawWriteHandle {
-                file,
-                sector_size,
-                size_bytes,
-                _volume_locks: volume_locks,
-            })
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            .map_err(FlashError::WindowsError)?
+        };
+        if handle.is_invalid() {
+            return Err(FlashError::SyncError);
+        }
+        let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+        Ok(WindowsRawWriteHandle {
+            file,
+            sector_size,
+            size_bytes,
+            _volume_locks: volume_locks,
         })
-        .await
-        .map_err(|_| FlashError::SyncError)?
     }
 }
 
