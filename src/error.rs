@@ -71,6 +71,12 @@ pub enum FlashError {
     #[cfg(target_os = "windows")]
     #[error(transparent)]
     WindowsError(#[from] windows::core::Error),
+    #[cfg(target_os = "windows")]
+    #[error("Something with a windows handle is gone wrong")]
+    WindowsHandle,
+    #[cfg(target_os = "windows")]
+    #[error("Windows the drive could not be locked")]
+    WindowsLockingFailed,
     // Linux Errors only with D-bus
     #[cfg(target_os = "linux")]
     #[error(transparent)]

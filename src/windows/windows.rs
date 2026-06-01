@@ -52,6 +52,7 @@ use windows::{
         System::{
             IO::DeviceIoControl,
             Ioctl::{
+                FSCTL_ALLOW_EXTENDED_DASD_IO,
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
                 IOCTL_STORAGE_EJECT_MEDIA,
@@ -204,20 +205,21 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 impl DeviceWriter for WindowsInterface {
     type Handle = WindowsRawWriteHandle;
 
+    /// Acquire and hold volume locks BEFORE opening the write handle.
+    /// unmount_volumes_on_drive_locked returns the lock handles; as long as
+    /// they stay alive inside WindowsRawWriteHandle, Windows cannot remount
+    /// the filesystem and interrupt our writes mid-flash.
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
         let path = device.path.clone();
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
 
-        // Acquire and hold volume locks BEFORE opening the write handle.
-        // unmount_volumes_on_drive_locked returns the lock handles; as long as
-        // they stay alive inside WindowsRawWriteHandle, Windows cannot remount
-        // the filesystem and interrupt our writes mid-flash.
         let volume_locks = unmount_volumes_on_drive_locked(&path)?;
 
         let path_str = path.to_string_lossy().to_string();
         let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
+        // open the device
         let handle = unsafe {
             CreateFileW(
                 PCWSTR(wide.as_ptr()),
@@ -231,8 +233,31 @@ impl DeviceWriter for WindowsInterface {
             .map_err(FlashError::WindowsError)?
         };
         if handle.is_invalid() {
-            return Err(FlashError::SyncError);
+            return Err(FlashError::WindowsHandle);
         }
+        // disable windows stay in partiton rule
+        unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_ALLOW_EXTENDED_DASD_IO,
+                None,
+                0,
+                None,
+                0,
+                None,
+                None,
+            )
+            .map_err(FlashError::WindowsError)?;
+        }
+
+        // locks the device
+        // that the drive can not be mounted while working with it
+        unsafe {
+            DeviceIoControl(handle, FSCTL_LOCK_VOLUME, None, 0, None, 0, None, None)
+                .map_err(|_| FlashError::WindowsLockingFailed)?
+        };
+
+        // SAFETY: extract the raw windows handle from windows
         let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
         Ok(WindowsRawWriteHandle {
             file,
