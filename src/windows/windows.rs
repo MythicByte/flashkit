@@ -26,6 +26,8 @@ use std::{
         Path,
         PathBuf,
     },
+    thread,
+    time::Duration,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use windows::{
@@ -47,6 +49,7 @@ use windows::{
             FindNextVolumeW,
             FindVolumeClose,
             GetVolumePathNamesForVolumeNameW,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
             OPEN_EXISTING,
         },
         System::{
@@ -252,12 +255,22 @@ impl DeviceWriter for WindowsInterface {
 
         // locks the device
         // that the drive can not be mounted while working with it
-        unsafe {
-            DeviceIoControl(handle, FSCTL_LOCK_VOLUME, None, 0, None, 0, None, None)
-                .map_err(|_| FlashError::WindowsLockingFailed)?
-        };
+        // loop for when something temporarily uses it
+        let mut locked = false;
+        for _ in 0..10 {
+            if unsafe {
+                DeviceIoControl(handle, FSCTL_LOCK_VOLUME, None, 0, None, 0, None, None).is_ok()
+            } {
+                locked = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
 
-        // SAFETY: extract the raw windows handle from windows
+        if !locked {
+            return Err(FlashError::WindowsLockingFailed);
+        }
+
         let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
         Ok(WindowsRawWriteHandle {
             file,
@@ -424,9 +437,49 @@ fn physical_drive_number(path: &Path) -> FlashResult<u32> {
 /// Return the physical device number for `handle` via
 /// `IOCTL_STORAGE_GET_DEVICE_NUMBER`, or `None` on failure.
 fn storage_device_number(handle: HANDLE) -> Option<u32> {
-    let mut sdn = STORAGE_DEVICE_NUMBER::default();
     let mut returned = 0u32;
-    unsafe {
+    #[repr(C)]
+    struct DISK_EXTENT {
+        disk_number: u32,
+        starting_offset: i64,
+        extent_length: i64,
+    }
+    #[repr(C)]
+    struct VOLUME_DISK_EXTENTS {
+        number_of_disk_extents: u32,
+        extents: [DISK_EXTENT; 1],
+    }
+
+    let mut extents = VOLUME_DISK_EXTENTS {
+        number_of_disk_extents: 0,
+        extents: [DISK_EXTENT {
+            disk_number: 0,
+            starting_offset: 0,
+            extent_length: 0,
+        }],
+    };
+
+    let success_extents = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            None,
+            0,
+            Some(&mut extents as *mut _ as *mut _),
+            size_of::<VOLUME_DISK_EXTENTS>() as u32,
+            Some(&mut returned),
+            None,
+        )
+        .is_ok()
+    };
+
+    if success_extents && returned > 0 && extents.number_of_disk_extents == 1 {
+        return Some(extents.extents[0].disk_number);
+    }
+
+    //  Fallback to IOCTL_STORAGE_GET_DEVICE_NUMBER
+    let mut sdn = STORAGE_DEVICE_NUMBER::default();
+    let success_sdn = unsafe {
         DeviceIoControl(
             handle,
             IOCTL_STORAGE_GET_DEVICE_NUMBER,
@@ -437,9 +490,14 @@ fn storage_device_number(handle: HANDLE) -> Option<u32> {
             Some(&mut returned),
             None,
         )
-        .ok()?;
+        .is_ok()
+    };
+
+    if success_sdn {
+        Some(sdn.DeviceNumber)
+    } else {
+        None
     }
-    Some(sdn.DeviceNumber)
 }
 
 // `GetVolumePathNamesForVolumeNameW` returns all of a volume's mount points
@@ -525,7 +583,7 @@ fn process_single_volume(
     let device_path = guid_path.trim_end_matches('\\');
     let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
 
-    // Open a zero-access handle just to read the physical device number.
+    // Query handle
     let query_handle = unsafe {
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
@@ -533,25 +591,24 @@ fn process_single_volume(
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
+            FILE_ATTRIBUTE_NORMAL,
             None,
         )
     }
     .map_err(|e| FlashError::FilesystemError(format!("Failed to query volume attributes: {e}")))?;
-    let query_guard = AutoCloseHandle(query_handle);
 
+    let query_guard = AutoCloseHandle(query_handle);
     let is_match = storage_device_number(query_handle) == Some(target_number);
-    drop(query_guard); // close the read-only handle before we open for writing
+    drop(query_guard);
 
     if !is_match {
         return Ok(None);
     }
 
-    // Remove drive letters / mount points so the OS stops using the volume.
+    // Remove drive letters / mount points
     remove_mount_points(guid_path);
 
-    // Open a write handle.  We must keep this handle open: it is what
-    // FSCTL_LOCK_VOLUME is bound to.  Closing it releases the lock.
+    // Open a write handle.
     let write_handle = unsafe {
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
@@ -559,39 +616,43 @@ fn process_single_volume(
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
+            FILE_ATTRIBUTE_NORMAL,
             None,
         )
     }
-    .map_err(|e| {
-        FlashError::FilesystemError(format!(
-            "Access denied or sharing violation opening volume for write.              Ensure the app is running as Administrator: {e}"
-        ))
-    })?;
-    // Wrap immediately so the handle is closed on any early return below.
-    let lock_guard = AutoCloseHandle(write_handle);
+    .map_err(|e| FlashError::FilesystemError(format!("Access denied opening volume: {e}")))?;
 
+    let lock_guard = AutoCloseHandle(write_handle);
     let mut bytes_returned = 0u32;
 
-    // Lock the volume.  This prevents the Volume Manager from remounting it
-    // while we hold the handle open.
-    unsafe {
-        DeviceIoControl(
-            write_handle,
-            FSCTL_LOCK_VOLUME,
-            None,
-            0,
-            None,
-            0,
-            Some(&mut bytes_returned),
-            None,
-        )
+    let mut locked = false;
+    for _ in 0..10 {
+        if unsafe {
+            DeviceIoControl(
+                write_handle,
+                FSCTL_LOCK_VOLUME,
+                None,
+                0,
+                None,
+                0,
+                Some(&mut bytes_returned),
+                None,
+            )
+            .is_ok()
+        } {
+            locked = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250)); // Wait for AV to release the drive
     }
-    .map_err(|e| {
-        FlashError::FilesystemError(format!("Failed to lock volume (files may be in use): {e}"))
-    })?;
 
-    // Dismount the filesystem so it cannot be accessed by any driver.
+    if !locked {
+        return Err(FlashError::FilesystemError(
+            "Failed to lock volume (files may be in use by Anti-Virus)".into(),
+        ));
+    }
+
+    // Dismount the filesystem
     unsafe {
         DeviceIoControl(
             write_handle,
@@ -606,9 +667,6 @@ fn process_single_volume(
     }
     .map_err(|e| FlashError::FilesystemError(format!("Failed to dismount volume: {e}")))?;
 
-    // Return the guard — DO NOT drop it here.  The caller stores it in
-    // WindowsRawWriteHandle._volume_locks so the lock survives until after
-    // the final flush.
     Ok(Some(lock_guard))
 }
 /// Query the system for all mount points (drive letters or paths)
