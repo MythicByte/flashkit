@@ -39,7 +39,6 @@ use windows::{
         Storage::FileSystem::{
             CreateFileW,
             DeleteVolumeMountPointW,
-            FILE_ATTRIBUTE_NORMAL,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
@@ -230,7 +229,7 @@ impl DeviceWriter for WindowsInterface {
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
                 None,
             )
             .map_err(FlashError::WindowsError)?
