@@ -309,7 +309,7 @@ impl DeviceEjector for WindowsInterface {
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || -> FlashResult<()> {
-            unmount_volumes_on_drive(&path)?;
+            unmount_volumes_on_drive_locked(&path)?;
             let path_str = path.to_string_lossy().to_string();
             let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -361,16 +361,10 @@ impl DeviceUnmounter for WindowsInterface {
     ///     `DeleteVolumeMountPointW`, then issue `FSCTL_DISMOUNT_VOLUME`.
     async fn unmount(&self, device: &BlockDevice) -> FlashResult<()> {
         let path = device.path.clone();
-        tokio::task::spawn_blocking(move || unmount_volumes_on_drive(&path))
+        tokio::task::spawn_blocking(move || unmount_volumes_on_drive_locked(&path).map(|_| ()))
             .await
             .map_err(|_| FlashError::SyncError)?
     }
-}
-
-fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
-    // Delegate to the locking variant and drop the handles immediately.
-    // Used by eject() which does not need to hold the lock afterwards.
-    unmount_volumes_on_drive_locked(physical_path).map(|_| ())
 }
 
 /// Dismount every volume on `physical_path` and **return the lock handles**.
@@ -522,23 +516,8 @@ fn decode_wide_nul_string(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..end])
 }
-// Separating this from the enumeration loop keeps two concerns distinct:
-//   - The loop in `unmount_volumes_on_drive` is only about *iteration*.
-//   - This function is only about *what to do with one volume*.
-//
-// All handle management here uses `AutoCloseHandle` so every CreateFileW
-// handle is closed exactly once, automatically, with no manual CloseHandle
-// calls needed.
 
-/// If `guid_path` belongs to the drive numbered `target_number`, remove all
-/// its mount points, lock it, and dismount its filesystem.
 ///
-/// Returns `Some(AutoCloseHandle)` — the **lock handle** — when the volume
-/// matches and was successfully locked.  The caller must keep this handle
-/// alive for the duration of the flash; dropping it releases
-/// `FSCTL_LOCK_VOLUME` and lets Windows remount the filesystem.
-///
-/// Returns `None` when the volume belongs to a different drive (not an error).
 fn process_single_volume(
     guid_path: &str,
     target_number: u32,
