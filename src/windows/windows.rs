@@ -237,20 +237,6 @@ impl DeviceWriter for WindowsInterface {
         if handle.is_invalid() {
             return Err(FlashError::WindowsHandle);
         }
-        // disable windows stay in partiton rule
-        unsafe {
-            DeviceIoControl(
-                handle,
-                FSCTL_ALLOW_EXTENDED_DASD_IO,
-                None,
-                0,
-                None,
-                0,
-                None,
-                None,
-            )
-            .map_err(FlashError::WindowsError)?;
-        }
 
         let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
         Ok(WindowsRawWriteHandle {
@@ -303,7 +289,6 @@ impl DeviceEjector for WindowsInterface {
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || -> FlashResult<()> {
-            unmount_volumes_on_drive_locked(&path)?;
             let path_str = path.to_string_lossy().to_string();
             let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
