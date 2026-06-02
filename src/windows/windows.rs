@@ -590,7 +590,7 @@ fn process_single_volume(
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
             None,
         )
     }
@@ -615,7 +615,7 @@ fn process_single_volume(
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
             None,
         )
     }
