@@ -294,6 +294,7 @@ where
         let buffer_slice =
             unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer.size()) };
         buffer_slice.fill(0);
+        handle.write_at(0, &buffer_slice)?;
         // Wipe the backup GPT at the end of the disk
         let disk_size = handle.size_bytes()?;
         let end_offset = disk_size.saturating_sub(buffer.size() as u64);
