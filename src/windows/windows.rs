@@ -1,3 +1,4 @@
+//! see for more information about dismount [dismount](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_dismount_volume)
 use crate::{
     data_types::{
         BlockDevice,
