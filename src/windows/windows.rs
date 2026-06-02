@@ -26,6 +26,8 @@ use std::{
         Path,
         PathBuf,
     },
+    thread,
+    time::Duration,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use windows::{
@@ -37,7 +39,6 @@ use windows::{
         Storage::FileSystem::{
             CreateFileW,
             DeleteVolumeMountPointW,
-            FILE_ATTRIBUTE_NORMAL,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
@@ -47,11 +48,13 @@ use windows::{
             FindNextVolumeW,
             FindVolumeClose,
             GetVolumePathNamesForVolumeNameW,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
             OPEN_EXISTING,
         },
         System::{
             IO::DeviceIoControl,
             Ioctl::{
+                FSCTL_ALLOW_EXTENDED_DASD_IO,
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
                 IOCTL_STORAGE_EJECT_MEDIA,
@@ -76,6 +79,7 @@ use crate::traits::{
 };
 
 /// Closes any file or device HANDLE on drop.
+#[derive(Debug)]
 struct AutoCloseHandle(HANDLE);
 
 impl Drop for AutoCloseHandle {
@@ -87,12 +91,18 @@ impl Drop for AutoCloseHandle {
         }
     }
 }
+// SAFETY: Windows HANDLEs are valid to send across threads and access from
+// multiple threads.  The OS itself is responsible for synchronising access
+// to the underlying kernel object.
+unsafe impl Send for AutoCloseHandle {}
+unsafe impl Sync for AutoCloseHandle {}
 
 /// Owns a `FindFirstVolumeW` enumeration cursor and closes it on drop.
 ///
 /// The raw HANDLE is kept private; all access goes through the typed methods
 /// below.  This prevents the Copy-able raw value from "escaping" and being
 /// used independently of its owner.
+#[derive(Debug)]
 struct VolumeFindHandle(HANDLE);
 
 impl VolumeFindHandle {
@@ -150,13 +160,17 @@ pub struct WindowsRawWriteHandle {
     file: std::fs::File,
     sector_size: usize,
     size_bytes: u64,
+    /// Keeps the FSCTL_LOCK_VOLUME handles alive for every volume on this
+    /// physical drive.  Dropping them releases the locks and lets Windows
+    /// remount the filesystems, so they must outlive every write/flush.
+    _volume_locks: Vec<AutoCloseHandle>,
 }
 
 impl RawWriteHandle for WindowsRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
         self.file
             .seek_write(buf, offset)
-            .map_err(|_| FlashError::SyncError)?;
+            .map_err(|e| FlashError::Io(e))?;
 
         Ok(())
     }
@@ -166,7 +180,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
         let bytes_read = self
             .file
             .seek_read(buf, offset)
-            .map_err(|_| FlashError::SyncError)?;
+            .map_err(|e| FlashError::Io(e))?;
         Ok(bytes_read)
     }
 
@@ -185,7 +199,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        self.file.seek(seek).map_err(|_| FlashError::SyncError)?;
+        self.file.seek(seek).map_err(|e| FlashError::Io(e))?;
         Ok(())
     }
 }
@@ -193,39 +207,44 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 impl DeviceWriter for WindowsInterface {
     type Handle = WindowsRawWriteHandle;
 
+    /// Acquire and hold volume locks BEFORE opening the write handle.
+    /// unmount_volumes_on_drive_locked returns the lock handles; as long as
+    /// they stay alive inside WindowsRawWriteHandle, Windows cannot remount
+    /// the filesystem and interrupt our writes mid-flash.
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
         let path = device.path.clone();
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
 
-        tokio::task::spawn_blocking(move || -> FlashResult<WindowsRawWriteHandle> {
-            let path_str = path.to_string_lossy().to_string();
-            let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let volume_locks = unmount_volumes_on_drive_locked(&path)?;
 
-            let handle = unsafe {
-                CreateFileW(
-                    PCWSTR(wide.as_ptr()),
-                    (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
-                    None,
-                )
-                .map_err(FlashError::WindowsError)?
-            };
-            if handle.is_invalid() {
-                return Err(FlashError::SyncError);
-            }
-            let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
-            Ok(WindowsRawWriteHandle {
-                file,
-                sector_size,
-                size_bytes,
-            })
+        let path_str = path.to_string_lossy().to_string();
+        let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+
+        // open the device
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            )
+            .map_err(FlashError::WindowsError)?
+        };
+        if handle.is_invalid() {
+            return Err(FlashError::WindowsHandle);
+        }
+
+        let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+        Ok(WindowsRawWriteHandle {
+            file,
+            sector_size,
+            size_bytes,
+            _volume_locks: volume_locks,
         })
-        .await
-        .map_err(|_| FlashError::SyncError)?
     }
 }
 
@@ -270,7 +289,6 @@ impl DeviceEjector for WindowsInterface {
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || -> FlashResult<()> {
-            unmount_volumes_on_drive(&path)?;
             let path_str = path.to_string_lossy().to_string();
             let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -322,38 +340,42 @@ impl DeviceUnmounter for WindowsInterface {
     ///     `DeleteVolumeMountPointW`, then issue `FSCTL_DISMOUNT_VOLUME`.
     async fn unmount(&self, device: &BlockDevice) -> FlashResult<()> {
         let path = device.path.clone();
-        tokio::task::spawn_blocking(move || unmount_volumes_on_drive(&path))
+        tokio::task::spawn_blocking(move || unmount_volumes_on_drive_locked(&path).map(|_| ()))
             .await
             .map_err(|_| FlashError::SyncError)?
     }
 }
 
-fn unmount_volumes_on_drive(physical_path: &Path) -> FlashResult<()> {
+/// Dismount every volume on `physical_path` and **return the lock handles**.
+///
+/// The caller must keep the returned `Vec<AutoCloseHandle>` alive for the
+/// entire flash operation.  Dropping them releases `FSCTL_LOCK_VOLUME` and
+/// lets Windows remount the filesystems, corrupting mid-flash writes.
+fn unmount_volumes_on_drive_locked(physical_path: &Path) -> FlashResult<Vec<AutoCloseHandle>> {
     const VOLUME_GUID_BUF_LEN: usize = 64;
     let mut vol_buf = vec![0u16; VOLUME_GUID_BUF_LEN];
 
     let target_number = physical_drive_number(physical_path)?;
 
-    // Start enumeration.  The guard calls `FindVolumeClose` when it drops,
-    // regardless of how this function exits.
+    // The guard calls `FindVolumeClose` when it drops.
     let finder = VolumeFindHandle::start(&mut vol_buf)?;
+    let mut locks: Vec<AutoCloseHandle> = Vec::new();
 
     loop {
         let guid_path = decode_wide_nul_string(&vol_buf);
 
-        // Per-volume errors are absorbed here.  A locked or inaccessible
-        // volume should not abort the whole unmount operation.
-        process_single_volume(&guid_path, target_number)?;
+        // Returns the lock handle for matching volumes; None = different drive.
+        if let Some(lock) = process_single_volume(&guid_path, target_number)? {
+            locks.push(lock);
+        }
 
-        // Advance the cursor.  When there are no more volumes,
-        // `FindNextVolumeW` signals ERROR_NO_MORE_FILES and we stop.
         vol_buf.fill(0);
         if !finder.advance(&mut vol_buf) {
             break;
         }
     }
 
-    Ok(())
+    Ok(locks)
 }
 
 /// Parse the drive number from a path like `\\.\PhysicalDrive2` → `2`.
@@ -381,9 +403,49 @@ fn physical_drive_number(path: &Path) -> FlashResult<u32> {
 /// Return the physical device number for `handle` via
 /// `IOCTL_STORAGE_GET_DEVICE_NUMBER`, or `None` on failure.
 fn storage_device_number(handle: HANDLE) -> Option<u32> {
-    let mut sdn = STORAGE_DEVICE_NUMBER::default();
     let mut returned = 0u32;
-    unsafe {
+    #[repr(C)]
+    struct DISK_EXTENT {
+        disk_number: u32,
+        starting_offset: i64,
+        extent_length: i64,
+    }
+    #[repr(C)]
+    struct VOLUME_DISK_EXTENTS {
+        number_of_disk_extents: u32,
+        extents: [DISK_EXTENT; 1],
+    }
+
+    let mut extents = VOLUME_DISK_EXTENTS {
+        number_of_disk_extents: 0,
+        extents: [DISK_EXTENT {
+            disk_number: 0,
+            starting_offset: 0,
+            extent_length: 0,
+        }],
+    };
+
+    let success_extents = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            None,
+            0,
+            Some(&mut extents as *mut _ as *mut _),
+            size_of::<VOLUME_DISK_EXTENTS>() as u32,
+            Some(&mut returned),
+            None,
+        )
+        .is_ok()
+    };
+
+    if success_extents && returned > 0 && extents.number_of_disk_extents == 1 {
+        return Some(extents.extents[0].disk_number);
+    }
+
+    //  Fallback to IOCTL_STORAGE_GET_DEVICE_NUMBER
+    let mut sdn = STORAGE_DEVICE_NUMBER::default();
+    let success_sdn = unsafe {
         DeviceIoControl(
             handle,
             IOCTL_STORAGE_GET_DEVICE_NUMBER,
@@ -394,9 +456,14 @@ fn storage_device_number(handle: HANDLE) -> Option<u32> {
             Some(&mut returned),
             None,
         )
-        .ok()?;
+        .is_ok()
+    };
+
+    if success_sdn {
+        Some(sdn.DeviceNumber)
+    } else {
+        None
     }
-    Some(sdn.DeviceNumber)
 }
 
 // `GetVolumePathNamesForVolumeNameW` returns all of a volume's mount points
@@ -473,22 +540,16 @@ fn decode_wide_nul_string(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..end])
 }
-// Separating this from the enumeration loop keeps two concerns distinct:
-//   - The loop in `unmount_volumes_on_drive` is only about *iteration*.
-//   - This function is only about *what to do with one volume*.
-//
-// All handle management here uses `AutoCloseHandle` so every CreateFileW
-// handle is closed exactly once, automatically, with no manual CloseHandle
-// calls needed.
 
-/// If `guid_path` belongs to the drive numbered `target_number`, remove all
-/// its mount points and dismount its filesystem.  Errors are absorbed: an
-/// inaccessible or already-unmounted volume is silently skipped.
-fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()> {
+///
+fn process_single_volume(
+    guid_path: &str,
+    target_number: u32,
+) -> FlashResult<Option<AutoCloseHandle>> {
     let device_path = guid_path.trim_end_matches('\\');
     let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
 
-    //  Open query handle to check device matching
+    // Query handle
     let query_handle = unsafe {
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
@@ -502,19 +563,18 @@ fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()>
     }
     .map_err(|e| FlashError::FilesystemError(format!("Failed to query volume attributes: {e}")))?;
 
+    let query_guard = AutoCloseHandle(query_handle);
     let is_match = storage_device_number(query_handle) == Some(target_number);
-    unsafe {
-        let _ = CloseHandle(query_handle); // Safely ignored
-    }
+    drop(query_guard);
 
     if !is_match {
-        return Ok(());
+        return Ok(None);
     }
 
-    //  Clear out drive letters/mount points
+    // Remove drive letters / mount points
     remove_mount_points(guid_path);
 
-    //  Open handle with Write privileges to issue locks/dismounts
+    // Open a write handle.
     let write_handle = unsafe {
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
@@ -525,35 +585,40 @@ fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()>
             FILE_FLAGS_AND_ATTRIBUTES(0),
             None,
         )
-    }.map_err(|e| {
-        FlashError::FilesystemError(format!(
-            "Access denied or sharing violation opening volume for write. Ensure app is running as ADMIN: {e}"
-        ))
-    })?;
+    }
+    .map_err(|e| FlashError::FilesystemError(format!("Access denied opening volume: {e}")))?;
 
+    let lock_guard = AutoCloseHandle(write_handle);
     let mut bytes_returned = 0u32;
 
-    //  CRITICAL: Lock the volume first to prevent the OS from immediately remounting it
-    unsafe {
-        DeviceIoControl(
-            write_handle,
-            FSCTL_LOCK_VOLUME,
-            None,
-            0,
-            None,
-            0,
-            Some(&mut bytes_returned),
-            None,
-        )
-    }
-    .map_err(|e| {
-        unsafe {
-            let _ = CloseHandle(write_handle);
+    let mut locked = false;
+    for _ in 0..10 {
+        if unsafe {
+            DeviceIoControl(
+                write_handle,
+                FSCTL_LOCK_VOLUME,
+                None,
+                0,
+                None,
+                0,
+                Some(&mut bytes_returned),
+                None,
+            )
+            .is_ok()
+        } {
+            locked = true;
+            break;
         }
-        FlashError::FilesystemError(format!("Failed to lock volume (files may be in use): {e}"))
-    })?;
+        thread::sleep(Duration::from_millis(250)); // Wait for AV to release the drive
+    }
 
-    //  Explicitly dismount the volume
+    if !locked {
+        return Err(FlashError::FilesystemError(
+            "Failed to lock volume (files may be in use by Anti-Virus)".into(),
+        ));
+    }
+
+    // Dismount the filesystem
     unsafe {
         DeviceIoControl(
             write_handle,
@@ -566,20 +631,9 @@ fn process_single_volume(guid_path: &str, target_number: u32) -> FlashResult<()>
             None,
         )
     }
-    .map_err(|e| {
-        unsafe {
-            let _ = CloseHandle(write_handle);
-        }
-        FlashError::FilesystemError(format!("Failed to dismount volume: {e}"))
-    })?;
+    .map_err(|e| FlashError::FilesystemError(format!("Failed to dismount volume: {e}")))?;
 
-    // NOTE: Keep 'write_handle' alive or store it during your flashing operation.
-    // Closing 'write_handle' releases the volume lock, which can cause Windows to remount it.
-    unsafe {
-        let _ = CloseHandle(write_handle);
-    }
-
-    Ok(())
+    Ok(Some(lock_guard))
 }
 /// Query the system for all mount points (drive letters or paths)
 /// associated with a specific physical drive number.
