@@ -170,7 +170,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
         self.file
             .seek_write(buf, offset)
-            .map_err(|_| FlashError::IoError)?;
+            .map_err(|e| FlashError::Io(e))?;
 
         Ok(())
     }
@@ -180,7 +180,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
         let bytes_read = self
             .file
             .seek_read(buf, offset)
-            .map_err(|_| FlashError::IoError)?;
+            .map_err(|e| FlashError::Io(e))?;
         Ok(bytes_read)
     }
 
@@ -199,7 +199,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        self.file.seek(seek).map_err(|_| FlashError::IoError)?;
+        self.file.seek(seek).map_err(|e| FlashError::Io(e))?;
         Ok(())
     }
 }
@@ -250,24 +250,6 @@ impl DeviceWriter for WindowsInterface {
                 None,
             )
             .map_err(FlashError::WindowsError)?;
-        }
-
-        // locks the device
-        // that the drive can not be mounted while working with it
-        // loop for when something temporarily uses it
-        let mut locked = false;
-        for _ in 0..10 {
-            if unsafe {
-                DeviceIoControl(handle, FSCTL_LOCK_VOLUME, None, 0, None, 0, None, None).is_ok()
-            } {
-                locked = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-
-        if !locked {
-            return Err(FlashError::WindowsLockingFailed);
         }
 
         let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
