@@ -77,6 +77,9 @@ pub enum FlashError {
     #[cfg(target_os = "windows")]
     #[error("Windows the drive could not be locked")]
     WindowsLockingFailed,
+    #[cfg(target_os = "windows")]
+    #[error("Io Error with Windows")]
+    IoError,
     // Linux Errors only with D-bus
     #[cfg(target_os = "linux")]
     #[error(transparent)]

@@ -168,7 +168,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
         self.file
             .seek_write(buf, offset)
-            .map_err(|_| FlashError::SyncError)?;
+            .map_err(|_| FlashError::IoError)?;
 
         Ok(())
     }
@@ -178,7 +178,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
         let bytes_read = self
             .file
             .seek_read(buf, offset)
-            .map_err(|_| FlashError::SyncError)?;
+            .map_err(|_| FlashError::IoError)?;
         Ok(bytes_read)
     }
 
@@ -197,7 +197,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        self.file.seek(seek).map_err(|_| FlashError::SyncError)?;
+        self.file.seek(seek).map_err(|_| FlashError::IoError)?;
         Ok(())
     }
 }
