@@ -54,7 +54,6 @@ use windows::{
         System::{
             IO::DeviceIoControl,
             Ioctl::{
-                FSCTL_ALLOW_EXTENDED_DASD_IO,
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
                 IOCTL_STORAGE_EJECT_MEDIA,
