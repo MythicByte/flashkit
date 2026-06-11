@@ -226,7 +226,8 @@ impl DeviceWriter for WindowsInterface {
             CreateFileW(
                 PCWSTR(wide.as_ptr()),
                 (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                // allow for infos to get
+                FILE_SHARE_READ,
                 None,
                 OPEN_EXISTING,
                 FILE_FLAGS_AND_ATTRIBUTES(0),
