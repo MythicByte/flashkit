@@ -320,7 +320,7 @@ impl DeviceEjector for WindowsRawWriteHandle {
             }
             return Ok(());
         }
-        Err(FlashError::SyncError)
+        Err(FlashError::WindowsGenericError)
     }
 }
 
@@ -335,7 +335,7 @@ impl DeviceUnmounter for WindowsRawWriteHandle {
             }
             return Ok(());
         }
-        Err(FlashError::SyncError)
+        Err(FlashError::WindowsGenericError)
     }
 }
 
