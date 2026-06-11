@@ -47,7 +47,6 @@ use windows::{
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
             FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
             FindFirstVolumeW,
             FindNextVolumeW,
             FindVolumeClose,
@@ -589,7 +588,7 @@ fn process_single_volume(
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -614,7 +613,7 @@ fn process_single_volume(
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -624,7 +623,6 @@ fn process_single_volume(
     .map_err(|e| FlashError::FilesystemError(format!("Access denied opening volume: {e}")))?;
 
     let lock_guard = AutoCloseHandle(write_handle);
-    let mut bytes_returned = 0u32;
 
     let mut locked = false;
     for _ in 0..10 {
@@ -636,7 +634,7 @@ fn process_single_volume(
                 0,
                 None,
                 0,
-                Some(&mut bytes_returned),
+                None,
                 None,
             )
             .is_ok()
@@ -662,7 +660,7 @@ fn process_single_volume(
             0,
             None,
             0,
-            Some(&mut bytes_returned),
+            None,
             None,
         )
     }
@@ -716,7 +714,7 @@ fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
