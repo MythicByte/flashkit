@@ -250,19 +250,20 @@ impl DeviceWriter for WindowsRawWriteHandle {
                 return Err(FlashError::WindowsHandle);
             }
             let volume_locks = unmount_volumes_on_drive_locked(&path)?;
-            unsafe {
-                DeviceIoControl(
-                    unmount_handle.0,
-                    FSCTL_DISMOUNT_VOLUME,
-                    None,
-                    0,
-                    None,
-                    0,
-                    None,
-                    None,
-                )
-                .map_err(FlashError::WindowsError)?;
-            }
+            // TODO: check later if needed or unmounting the letters is enough
+            // unsafe {
+            //     DeviceIoControl(
+            //         unmount_handle.0,
+            //         FSCTL_DISMOUNT_VOLUME,
+            //         None,
+            //         0,
+            //         None,
+            //         0,
+            //         None,
+            //         None,
+            //     )
+            //     .map_err(FlashError::WindowsError)?;
+            // }
             // needs for opening later with write
             drop(unmount_handle);
             volume_locks
@@ -328,10 +329,27 @@ impl DeviceEnumerator for WindowsRawWriteHandle {
                         .as_deref()
                         .map(|m| m.contains("Removable"))
                         .unwrap_or(false);
+                    let path = PathBuf::from(&d.device_id);
+                    let device_placeholder = BlockDevice::new(
+                        String::new(),
+                        path.clone(),
+                        d.model.clone(),
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
+                    );
+
+                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
+                    let letters = get_drive_letters_for_drive(device_placeholder);
+                    let display_path = if letters.is_empty() {
+                        d.device_id.clone()
+                    } else {
+                        letters.join(", ")
+                    };
 
                     BlockDevice::new(
-                        "Placeholder".to_string(),
-                        PathBuf::from(&d.device_id),
+                        display_path,
+                        path,
                         d.model,
                         size_bytes,
                         is_removable,
@@ -888,9 +906,26 @@ impl WindowsRawWriteHandle {
                         .map(|m| m.contains("Removable"))
                         .unwrap_or(false);
 
+                    let path = PathBuf::from(&d.device_id);
+                    let device_placeholder = BlockDevice::new(
+                        String::new(),
+                        path.clone(),
+                        d.model.clone(),
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
+                    );
+
+                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
+                    let letters = get_drive_letters_for_drive(device_placeholder);
+                    let display_path = if letters.is_empty() {
+                        d.device_id.clone()
+                    } else {
+                        letters.join(", ")
+                    };
                     BlockDevice::new(
-                        "Placeholder".to_string(),
-                        PathBuf::from(&d.device_id),
+                        display_path,
+                        path,
                         d.model,
                         size_bytes,
                         is_removable,
