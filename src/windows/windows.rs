@@ -269,6 +269,7 @@ impl DeviceEnumerator for WindowsInterface {
                         .unwrap_or(false);
 
                     BlockDevice::new(
+                        "Placeholder".to_string(),
                         PathBuf::from(&d.device_id),
                         d.model,
                         size_bytes,
