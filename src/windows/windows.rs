@@ -178,7 +178,6 @@ impl RawWriteHandle for WindowsRawWriteHandle {
         Ok(())
     }
 
-    /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
         let bytes_read = match &mut self.file {
             Some(file) => file.seek_read(buf, offset).map_err(|e| FlashError::Io(e))?,
@@ -187,7 +186,7 @@ impl RawWriteHandle for WindowsRawWriteHandle {
         Ok(bytes_read)
     }
 
-    /// Flush kernel write buffers to physical media via `FlushFileBuffers`.
+    /// Flush kernel write buffers to physical media
     fn flush_to_disk(&mut self) -> FlashResult<()> {
         match &mut self.file {
             Some(file) => {
