@@ -101,7 +101,7 @@ pub trait DeviceEjector {
 }
 
 /// Generic Flasher
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Flasher<T>
 where
     T: DeviceEnumerator + DeviceUnmounter + DeviceWriter + DeviceEjector + AsyncDeviceEnumerator,
