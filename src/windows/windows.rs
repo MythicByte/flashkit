@@ -47,7 +47,6 @@ use windows::{
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
             FILE_SHARE_READ,
-            FILE_SHARE_WRITE,
             FindFirstVolumeW,
             FindNextVolumeW,
             FindVolumeClose,
@@ -60,6 +59,7 @@ use windows::{
             Ioctl::{
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
+                IOCTL_DISK_UPDATE_PROPERTIES,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
@@ -227,12 +227,47 @@ impl DeviceWriter for WindowsRawWriteHandle {
         let path = device.path.clone();
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
-
-        let volume_locks = unmount_volumes_on_drive_locked(&path)?;
-
         let path_str = path.to_string_lossy().to_string();
         let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
+        // for unmounting
+        let volume_locks = {
+            let unmount_handle = unsafe {
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    (FILE_GENERIC_READ).0,
+                    // allow for infos to get
+                    FILE_SHARE_READ,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAGS_AND_ATTRIBUTES(0),
+                    None,
+                )
+                .map(|x| AutoCloseHandle(x))
+                .map_err(FlashError::WindowsError)?
+            };
+            if unmount_handle.0.is_invalid() {
+                return Err(FlashError::WindowsHandle);
+            }
+            let volume_locks = unmount_volumes_on_drive_locked(&path)?;
+            // TODO: check later if needed or unmounting the letters is enough
+            // unsafe {
+            //     DeviceIoControl(
+            //         unmount_handle.0,
+            //         FSCTL_DISMOUNT_VOLUME,
+            //         None,
+            //         0,
+            //         None,
+            //         0,
+            //         None,
+            //         None,
+            //     )
+            //     .map_err(FlashError::WindowsError)?;
+            // }
+            // needs for opening later with write
+            drop(unmount_handle);
+            volume_locks
+        };
         // open the device
         let handle = unsafe {
             CreateFileW(
@@ -251,6 +286,20 @@ impl DeviceWriter for WindowsRawWriteHandle {
             return Err(FlashError::WindowsHandle);
         }
 
+        // from diskpart to give windows a refresh
+        unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_DISK_UPDATE_PROPERTIES,
+                None,
+                0,
+                None,
+                0,
+                None,
+                None,
+            )
+            .map_err(FlashError::WindowsError)?;
+        }
         let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
         Ok(WindowsRawWriteHandle {
             file: Some(file),
@@ -280,10 +329,27 @@ impl DeviceEnumerator for WindowsRawWriteHandle {
                         .as_deref()
                         .map(|m| m.contains("Removable"))
                         .unwrap_or(false);
+                    let path = PathBuf::from(&d.device_id);
+                    let device_placeholder = BlockDevice::new(
+                        String::new(),
+                        path.clone(),
+                        d.model.clone(),
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
+                    );
+
+                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
+                    let letters = get_drive_letters_for_drive(device_placeholder);
+                    let display_path = if letters.is_empty() {
+                        d.device_id.clone()
+                    } else {
+                        letters.join(", ")
+                    };
 
                     BlockDevice::new(
-                        "Placeholder".to_string(),
-                        PathBuf::from(&d.device_id),
+                        display_path,
+                        path,
                         d.model,
                         size_bytes,
                         is_removable,
@@ -324,17 +390,11 @@ impl DeviceEjector for WindowsRawWriteHandle {
 }
 
 impl DeviceUnmounter for WindowsRawWriteHandle {
-    /// simple unmount via **DeviceIoControl**
+    /// removed because of complex configureguration moved into [open_for_writing]
+    ///
+    /// **does nothing**
     async fn unmount(&self, _device: &BlockDevice) -> FlashResult<()> {
-        if let Some(file) = &self.file {
-            let handle = HANDLE(file.as_raw_handle());
-            unsafe {
-                DeviceIoControl(handle, FSCTL_DISMOUNT_VOLUME, None, 0, None, 0, None, None)
-                    .map_err(FlashError::WindowsError)?;
-            }
-            return Ok(());
-        }
-        Err(FlashError::WindowsGenericError)
+        Ok(())
     }
 }
 
@@ -546,7 +606,7 @@ fn process_single_volume(
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -571,7 +631,7 @@ fn process_single_volume(
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -581,7 +641,6 @@ fn process_single_volume(
     .map_err(|e| FlashError::FilesystemError(format!("Access denied opening volume: {e}")))?;
 
     let lock_guard = AutoCloseHandle(write_handle);
-    let mut bytes_returned = 0u32;
 
     let mut locked = false;
     for _ in 0..10 {
@@ -593,7 +652,7 @@ fn process_single_volume(
                 0,
                 None,
                 0,
-                Some(&mut bytes_returned),
+                None,
                 None,
             )
             .is_ok()
@@ -619,7 +678,7 @@ fn process_single_volume(
             0,
             None,
             0,
-            Some(&mut bytes_returned),
+            None,
             None,
         )
     }
@@ -673,7 +732,7 @@ fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -847,9 +906,26 @@ impl WindowsRawWriteHandle {
                         .map(|m| m.contains("Removable"))
                         .unwrap_or(false);
 
+                    let path = PathBuf::from(&d.device_id);
+                    let device_placeholder = BlockDevice::new(
+                        String::new(),
+                        path.clone(),
+                        d.model.clone(),
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
+                    );
+
+                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
+                    let letters = get_drive_letters_for_drive(device_placeholder);
+                    let display_path = if letters.is_empty() {
+                        d.device_id.clone()
+                    } else {
+                        letters.join(", ")
+                    };
                     BlockDevice::new(
-                        "Placeholder".to_string(),
-                        PathBuf::from(&d.device_id),
+                        display_path,
+                        path,
                         d.model,
                         size_bytes,
                         is_removable,
