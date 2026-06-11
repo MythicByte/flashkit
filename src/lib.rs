@@ -110,7 +110,7 @@ pub mod traits;
 /// Windows
 pub mod windows;
 #[cfg(target_os = "windows")]
-use crate::windows::windows::WindowsInterface as Interface;
+use crate::windows::windows::WindowsRawWriteHandle as Interface;
 
 #[cfg(target_os = "linux")]
 use crate::linux::linux::LinuxDBus as Interface;
@@ -146,7 +146,7 @@ pub async fn flash() -> FlashResult<OsFlasher> {
 #[cfg(target_os = "windows")]
 #[must_use = "Use or remove libary"]
 pub async fn flash() -> FlashResult<OsFlasher> {
-    let device = Interface;
+    let device = Interface::default();
     Ok(Flasher::new(device))
 }
 /// Automatically creates a Flasher configured for the current operating system.

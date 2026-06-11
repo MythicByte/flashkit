@@ -151,13 +151,9 @@ struct Win32DiskDrive {
 }
 
 #[allow(missing_docs)]
-#[derive(Debug, Clone)]
-pub struct WindowsInterface;
-
-#[allow(missing_docs)]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WindowsRawWriteHandle {
-    file: std::fs::File,
+    file: Option<std::fs::File>,
     sector_size: usize,
     size_bytes: u64,
     /// Keeps the FSCTL_LOCK_VOLUME handles alive for every volume on this
@@ -168,25 +164,34 @@ pub struct WindowsRawWriteHandle {
 
 impl RawWriteHandle for WindowsRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        self.file
-            .seek_write(buf, offset)
-            .map_err(|e| FlashError::Io(e))?;
+        match &mut self.file {
+            Some(file) => {
+                file.seek_write(buf, offset)
+                    .map_err(|e| FlashError::Io(e))?;
+            }
+            None => return Err(FlashError::WindowsHandle),
+        }
 
         Ok(())
     }
 
     /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        let bytes_read = self
-            .file
-            .seek_read(buf, offset)
-            .map_err(|e| FlashError::Io(e))?;
+        let bytes_read = match &mut self.file {
+            Some(file) => file.seek_read(buf, offset).map_err(|e| FlashError::Io(e))?,
+            None => return Err(FlashError::WindowsHandle),
+        };
         Ok(bytes_read)
     }
 
     /// Flush kernel write buffers to physical media via `FlushFileBuffers`.
     fn flush_to_disk(&mut self) -> FlashResult<()> {
-        self.file.sync_all()?;
+        match &mut self.file {
+            Some(file) => {
+                file.sync_all()?;
+            }
+            None => return Err(FlashError::WindowsHandle),
+        }
         Ok(())
     }
 
@@ -199,12 +204,17 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        self.file.seek(seek).map_err(|e| FlashError::Io(e))?;
+        match &mut self.file {
+            Some(file) => {
+                file.seek(seek).map_err(|e| FlashError::Io(e))?;
+            }
+            None => return Err(FlashError::WindowsHandle),
+        }
         Ok(())
     }
 }
 
-impl DeviceWriter for WindowsInterface {
+impl DeviceWriter for WindowsRawWriteHandle {
     type Handle = WindowsRawWriteHandle;
 
     /// Acquire and hold volume locks BEFORE opening the write handle.
@@ -241,7 +251,7 @@ impl DeviceWriter for WindowsInterface {
 
         let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
         Ok(WindowsRawWriteHandle {
-            file,
+            file: Some(file),
             sector_size,
             size_bytes,
             _volume_locks: volume_locks,
@@ -249,7 +259,7 @@ impl DeviceWriter for WindowsInterface {
     }
 }
 
-impl DeviceEnumerator for WindowsInterface {
+impl DeviceEnumerator for WindowsRawWriteHandle {
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
         tokio::task::spawn_blocking(|| {
             let wmi = WMIConnection::new()
@@ -287,7 +297,7 @@ impl DeviceEnumerator for WindowsInterface {
     }
 }
 
-impl DeviceEjector for WindowsInterface {
+impl DeviceEjector for WindowsRawWriteHandle {
     async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
         let path = device.path.clone();
         tokio::task::spawn_blocking(move || -> FlashResult<()> {
@@ -331,7 +341,7 @@ impl DeviceEjector for WindowsInterface {
     }
 }
 
-impl DeviceUnmounter for WindowsInterface {
+impl DeviceUnmounter for WindowsRawWriteHandle {
     /// Dismount every volume on the target physical drive.
     ///
     /// This mirrors the `removeDriveLetters` + volume-dismount sequence from
@@ -747,7 +757,7 @@ fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<
 
     Some(vol_letters)
 }
-impl AsyncDeviceEnumerator for WindowsInterface {
+impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
     type WatchStream = ReceiverStream<DeviceEvent>;
 
     async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
@@ -760,8 +770,6 @@ impl AsyncDeviceEnumerator for WindowsInterface {
                 return Ok(ReceiverStream::new(rx));
             }
         }
-
-        let enumerator = self.clone();
 
         tokio::spawn(async move {
             let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -802,7 +810,7 @@ impl AsyncDeviceEnumerator for WindowsInterface {
                 tokio::time::sleep(std::time::Duration::from_millis(750)).await;
 
                 // Re-scan active drives
-                let current_devices = match enumerator.list_devices().await {
+                let current_devices = match Self::list_devices().await {
                     Ok(d) => d,
                     Err(e) => {
                         tracing::warn!("Failed to re-enumerate devices during WMI wake: {e}");
@@ -836,5 +844,43 @@ impl AsyncDeviceEnumerator for WindowsInterface {
         });
 
         Ok(ReceiverStream::new(rx))
+    }
+}
+impl WindowsRawWriteHandle {
+    /// for that the trait can not be used, should be cleanup later
+    async fn list_devices() -> FlashResult<Vec<BlockDevice>> {
+        tokio::task::spawn_blocking(|| {
+            let wmi = WMIConnection::new()
+                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
+
+            let drives: Vec<Win32DiskDrive> = wmi
+                .query()
+                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
+
+            let devices = drives
+                .into_iter()
+                .map(|d| {
+                    let size_bytes = d.size.unwrap_or(0);
+                    let is_removable = d
+                        .media_type
+                        .as_deref()
+                        .map(|m| m.contains("Removable"))
+                        .unwrap_or(false);
+
+                    BlockDevice::new(
+                        "Placeholder".to_string(),
+                        PathBuf::from(&d.device_id),
+                        d.model,
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
+                    )
+                })
+                .collect();
+
+            Ok(devices)
+        })
+        .await
+        .map_err(|_| FlashError::SyncError)?
     }
 }
