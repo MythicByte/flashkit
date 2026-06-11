@@ -304,7 +304,6 @@ impl DeviceEjector for WindowsRawWriteHandle {
     async fn eject(&self, _device: &BlockDevice) -> FlashResult<()> {
         if let Some(file) = &self.file {
             let handle = HANDLE(file.as_raw_handle());
-            let mut bytes_returned = 0u32;
             unsafe {
                 DeviceIoControl(
                     handle,
@@ -313,7 +312,7 @@ impl DeviceEjector for WindowsRawWriteHandle {
                     0,
                     None,
                     0,
-                    Some(&mut bytes_returned),
+                    None,
                     None,
                 )
                 .map_err(FlashError::WindowsError)?;
