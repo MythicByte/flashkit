@@ -301,6 +301,7 @@ impl DeviceEnumerator for WindowsRawWriteHandle {
 }
 
 impl DeviceEjector for WindowsRawWriteHandle {
+    /// eject via **DeviceIoControl**
     async fn eject(&self, _device: &BlockDevice) -> FlashResult<()> {
         if let Some(file) = &self.file {
             let handle = HANDLE(file.as_raw_handle());
@@ -324,19 +325,17 @@ impl DeviceEjector for WindowsRawWriteHandle {
 }
 
 impl DeviceUnmounter for WindowsRawWriteHandle {
-    /// Dismount every volume on the target physical drive.
-    ///
-    /// This mirrors the `removeDriveLetters` + volume-dismount sequence from
-    ///  1. Walk all system volumes via `FindFirstVolumeW` / `FindNextVolumeW`.
-    ///  2. Identify which physical drive each volume lives on using
-    ///     `IOCTL_STORAGE_GET_DEVICE_NUMBER`.
-    ///  3. For matching volumes: remove mount-point paths with
-    ///     `DeleteVolumeMountPointW`, then issue `FSCTL_DISMOUNT_VOLUME`.
-    async fn unmount(&self, device: &BlockDevice) -> FlashResult<()> {
-        let path = device.path.clone();
-        tokio::task::spawn_blocking(move || unmount_volumes_on_drive_locked(&path).map(|_| ()))
-            .await
-            .map_err(|_| FlashError::SyncError)?
+    /// simple unmount via **DeviceIoControl**
+    async fn unmount(&self, _device: &BlockDevice) -> FlashResult<()> {
+        if let Some(file) = &self.file {
+            let handle = HANDLE(file.as_raw_handle());
+            unsafe {
+                DeviceIoControl(handle, FSCTL_DISMOUNT_VOLUME, None, 0, None, 0, None, None)
+                    .map_err(FlashError::WindowsError)?;
+            }
+            return Ok(());
+        }
+        Err(FlashError::SyncError)
     }
 }
 
