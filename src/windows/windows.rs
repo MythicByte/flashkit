@@ -60,6 +60,7 @@ use windows::{
             Ioctl::{
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
+                IOCTL_DISK_UPDATE_PROPERTIES,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
@@ -227,12 +228,46 @@ impl DeviceWriter for WindowsRawWriteHandle {
         let path = device.path.clone();
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
-
-        let volume_locks = unmount_volumes_on_drive_locked(&path)?;
-
         let path_str = path.to_string_lossy().to_string();
         let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
+        // for unmounting
+        let volume_locks = {
+            let unmount_handle = unsafe {
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    (FILE_GENERIC_READ).0,
+                    // allow for infos to get
+                    FILE_SHARE_READ,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAGS_AND_ATTRIBUTES(0),
+                    None,
+                )
+                .map(|x| AutoCloseHandle(x))
+                .map_err(FlashError::WindowsError)?
+            };
+            if unmount_handle.0.is_invalid() {
+                return Err(FlashError::WindowsHandle);
+            }
+            let volume_locks = unmount_volumes_on_drive_locked(&path)?;
+            unsafe {
+                DeviceIoControl(
+                    unmount_handle.0,
+                    FSCTL_DISMOUNT_VOLUME,
+                    None,
+                    0,
+                    None,
+                    0,
+                    None,
+                    None,
+                )
+                .map_err(FlashError::WindowsError)?;
+            }
+            // needs for opening later with write
+            drop(unmount_handle);
+            volume_locks
+        };
         // open the device
         let handle = unsafe {
             CreateFileW(
@@ -251,6 +286,20 @@ impl DeviceWriter for WindowsRawWriteHandle {
             return Err(FlashError::WindowsHandle);
         }
 
+        // from diskpart to give windows a refresh
+        unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_DISK_UPDATE_PROPERTIES,
+                None,
+                0,
+                None,
+                0,
+                None,
+                None,
+            )
+            .map_err(FlashError::WindowsError)?;
+        }
         let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
         Ok(WindowsRawWriteHandle {
             file: Some(file),
@@ -324,17 +373,11 @@ impl DeviceEjector for WindowsRawWriteHandle {
 }
 
 impl DeviceUnmounter for WindowsRawWriteHandle {
-    /// simple unmount via **DeviceIoControl**
+    /// removed because of complex configureguration moved into [open_for_writing]
+    ///
+    /// **does nothing**
     async fn unmount(&self, _device: &BlockDevice) -> FlashResult<()> {
-        if let Some(file) = &self.file {
-            let handle = HANDLE(file.as_raw_handle());
-            unsafe {
-                DeviceIoControl(handle, FSCTL_DISMOUNT_VOLUME, None, 0, None, 0, None, None)
-                    .map_err(FlashError::WindowsError)?;
-            }
-            return Ok(());
-        }
-        Err(FlashError::WindowsGenericError)
+        Ok(())
     }
 }
 
