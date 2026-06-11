@@ -21,7 +21,10 @@ use std::{
     mem::size_of,
     os::windows::{
         fs::FileExt,
-        io::FromRawHandle,
+        io::{
+            AsRawHandle,
+            FromRawHandle,
+        },
     },
     path::{
         Path,
@@ -298,28 +301,10 @@ impl DeviceEnumerator for WindowsRawWriteHandle {
 }
 
 impl DeviceEjector for WindowsRawWriteHandle {
-    async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
-        let path = device.path.clone();
-        tokio::task::spawn_blocking(move || -> FlashResult<()> {
-            let path_str = path.to_string_lossy().to_string();
-            let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
-
-            let handle = unsafe {
-                CreateFileW(
-                    PCWSTR(wide.as_ptr()),
-                    (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_FLAGS_AND_ATTRIBUTES(0),
-                    None,
-                )
-                .map_err(FlashError::WindowsError)?
-            };
-
-            if handle.is_invalid() {
-                return Err(FlashError::SyncError);
-            }
+    async fn eject(&self, _device: &BlockDevice) -> FlashResult<()> {
+        if let Some(file) = &self.file {
+            let handle = HANDLE(file.as_raw_handle());
+            let mut bytes_returned = 0u32;
             unsafe {
                 DeviceIoControl(
                     handle,
@@ -328,16 +313,14 @@ impl DeviceEjector for WindowsRawWriteHandle {
                     0,
                     None,
                     0,
-                    None,
+                    Some(&mut bytes_returned),
                     None,
                 )
-                .ok();
-                CloseHandle(handle).ok();
+                .map_err(FlashError::WindowsError)?;
             }
-            Ok(())
-        })
-        .await
-        .map_err(|e| FlashError::FilesystemError(e.to_string()))?
+            return Ok(());
+        }
+        Err(FlashError::SyncError)
     }
 }
 
