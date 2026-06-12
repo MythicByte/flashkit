@@ -47,6 +47,7 @@ use windows::{
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
             FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
             FindFirstVolumeW,
             FindNextVolumeW,
             FindVolumeClose,
@@ -232,23 +233,83 @@ impl DeviceWriter for WindowsRawWriteHandle {
 
         // for unmounting
         let volume_locks = {
-            let unmount_handle = unsafe {
-                CreateFileW(
-                    PCWSTR(wide.as_ptr()),
-                    (FILE_GENERIC_READ).0,
-                    // allow for infos to get
-                    FILE_SHARE_READ,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_FLAGS_AND_ATTRIBUTES(0),
-                    None,
-                )
-                .map(|x| AutoCloseHandle(x))
-                .map_err(FlashError::WindowsError)?
-            };
+            let unmount_handle = 'attempt: {
+                let mut last_error = FlashError::WindowsHandle;
+
+                for _ in 0..10 {
+                    unsafe {
+                        let handle_result = CreateFileW(
+                            PCWSTR(wide.as_ptr()),
+                            FILE_GENERIC_READ.0,
+                            FILE_SHARE_READ,
+                            None,
+                            OPEN_EXISTING,
+                            FILE_FLAGS_AND_ATTRIBUTES(0),
+                            None,
+                        );
+
+                        match handle_result {
+                            Ok(handle) if !handle.is_invalid() => {
+                                // Wrap it in your AutoCloseHandle and break out of the block with it
+                                break 'attempt Ok(AutoCloseHandle(handle));
+                            }
+                            _ => {
+                                // If it failed or the handle was invalid, we map the error
+                                // and let the loop try again
+                                last_error = FlashError::WindowsHandle;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // try with share write
+                for _ in 0..10 {
+                    unsafe {
+                        let handle_result = CreateFileW(
+                            PCWSTR(wide.as_ptr()),
+                            FILE_GENERIC_READ.0,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            None,
+                            OPEN_EXISTING,
+                            FILE_FLAGS_AND_ATTRIBUTES(0),
+                            None,
+                        );
+
+                        match handle_result {
+                            Ok(handle) if !handle.is_invalid() => {
+                                // Wrap it in your AutoCloseHandle and break out of the block with it
+                                break 'attempt Ok(AutoCloseHandle(handle));
+                            }
+                            _ => {
+                                // If it failed or the handle was invalid, we map the error
+                                // and let the loop try again
+                                last_error = FlashError::WindowsHandle;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // If the loop finishes all 20 attempts without success, return the error
+                Err(last_error)
+            }?;
             if unmount_handle.0.is_invalid() {
                 return Err(FlashError::WindowsHandle);
             }
+            // locks it
+            unsafe {
+                DeviceIoControl(
+                    unmount_handle.0,
+                    FSCTL_DISMOUNT_VOLUME,
+                    None,
+                    0,
+                    None,
+                    0,
+                    None,
+                    None,
+                )
+                .map_err(FlashError::WindowsError)?;
+            }
+            // remove letters
             let volume_locks = unmount_volumes_on_drive_locked(&path)?;
             // TODO: check later if needed or unmounting the letters is enough
             // unsafe {
@@ -269,27 +330,72 @@ impl DeviceWriter for WindowsRawWriteHandle {
             volume_locks
         };
         // open the device
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                // allow for infos to get
-                FILE_SHARE_READ,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
-                None,
-            )
-            .map_err(FlashError::WindowsError)?
-        };
-        if handle.is_invalid() {
-            return Err(FlashError::WindowsHandle);
-        }
+        let handle = 'attempt: {
+            let mut last_error = FlashError::WindowsHandle;
+
+            for _ in 0..10 {
+                unsafe {
+                    let handle_result = CreateFileW(
+                        PCWSTR(wide.as_ptr()),
+                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                        // allow for infos to get
+                        FILE_SHARE_READ,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_FLAGS_AND_ATTRIBUTES(0),
+                        None,
+                    );
+
+                    match handle_result {
+                        Ok(handle) if !handle.is_invalid() => {
+                            // Wrap it in your AutoCloseHandle and break out of the block with it
+                            break 'attempt Ok(AutoCloseHandle(handle));
+                        }
+                        _ => {
+                            // If it failed or the handle was invalid, we map the error
+                            // and let the loop try again
+                            last_error = FlashError::WindowsHandle;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // now share write
+            for _ in 0..10 {
+                unsafe {
+                    let handle_result = CreateFileW(
+                        PCWSTR(wide.as_ptr()),
+                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                        // allow for infos to get
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_FLAGS_AND_ATTRIBUTES(0),
+                        None,
+                    );
+
+                    match handle_result {
+                        Ok(handle) if !handle.is_invalid() => {
+                            // Wrap it in your AutoCloseHandle and break out of the block with it
+                            break 'attempt Ok(AutoCloseHandle(handle));
+                        }
+                        _ => {
+                            // If it failed or the handle was invalid, we map the error
+                            // and let the loop try again
+                            last_error = FlashError::WindowsHandle;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // If the loop finishes all 20 attempts without success, return the error
+            Err(last_error)
+        }?;
 
         // from diskpart to give windows a refresh
         unsafe {
             DeviceIoControl(
-                handle,
+                handle.0,
                 IOCTL_DISK_UPDATE_PROPERTIES,
                 None,
                 0,
@@ -300,7 +406,7 @@ impl DeviceWriter for WindowsRawWriteHandle {
             )
             .map_err(FlashError::WindowsError)?;
         }
-        let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+        let file = unsafe { std::fs::File::from_raw_handle(handle.0.0) };
         Ok(WindowsRawWriteHandle {
             file: Some(file),
             sector_size,
@@ -606,7 +712,7 @@ fn process_single_volume(
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             0,
-            FILE_SHARE_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -631,7 +737,7 @@ fn process_single_volume(
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-            FILE_SHARE_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
