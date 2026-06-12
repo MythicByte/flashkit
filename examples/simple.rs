@@ -5,10 +5,7 @@ use tracing::{
     Level,
     info,
 };
-use tracing_subscriber::{
-    FmtSubscriber,
-    fmt::format::FmtSpan,
-};
+use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() {

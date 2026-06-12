@@ -1,3 +1,4 @@
+//! see for more information about dismount [dismount](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_dismount_volume)
 use crate::{
     data_types::{
         BlockDevice,
@@ -20,7 +21,10 @@ use std::{
     mem::size_of,
     os::windows::{
         fs::FileExt,
-        io::FromRawHandle,
+        io::{
+            AsRawHandle,
+            FromRawHandle,
+        },
     },
     path::{
         Path,
@@ -54,9 +58,9 @@ use windows::{
         System::{
             IO::DeviceIoControl,
             Ioctl::{
-                FSCTL_ALLOW_EXTENDED_DASD_IO,
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
+                IOCTL_DISK_UPDATE_PROPERTIES,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
@@ -151,13 +155,9 @@ struct Win32DiskDrive {
 }
 
 #[allow(missing_docs)]
-#[derive(Debug, Clone)]
-pub struct WindowsInterface;
-
-#[allow(missing_docs)]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WindowsRawWriteHandle {
-    file: std::fs::File,
+    file: Option<std::fs::File>,
     sector_size: usize,
     size_bytes: u64,
     /// Keeps the FSCTL_LOCK_VOLUME handles alive for every volume on this
@@ -168,25 +168,33 @@ pub struct WindowsRawWriteHandle {
 
 impl RawWriteHandle for WindowsRawWriteHandle {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()> {
-        self.file
-            .seek_write(buf, offset)
-            .map_err(|e| FlashError::Io(e))?;
+        match &mut self.file {
+            Some(file) => {
+                file.seek_write(buf, offset)
+                    .map_err(|e| FlashError::Io(e))?;
+            }
+            None => return Err(FlashError::WindowsHandle),
+        }
 
         Ok(())
     }
 
-    /// Positional read via `ReadFile` + `OVERLAPPED` — mirror of `write_at`.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize> {
-        let bytes_read = self
-            .file
-            .seek_read(buf, offset)
-            .map_err(|e| FlashError::Io(e))?;
+        let bytes_read = match &mut self.file {
+            Some(file) => file.seek_read(buf, offset).map_err(|e| FlashError::Io(e))?,
+            None => return Err(FlashError::WindowsHandle),
+        };
         Ok(bytes_read)
     }
 
-    /// Flush kernel write buffers to physical media via `FlushFileBuffers`.
+    /// Flush kernel write buffers to physical media
     fn flush_to_disk(&mut self) -> FlashResult<()> {
-        self.file.sync_all()?;
+        match &mut self.file {
+            Some(file) => {
+                file.sync_all()?;
+            }
+            None => return Err(FlashError::WindowsHandle),
+        }
         Ok(())
     }
 
@@ -199,12 +207,17 @@ impl RawWriteHandle for WindowsRawWriteHandle {
     }
 
     fn seek(&mut self, seek: SeekFrom) -> FlashResult<()> {
-        self.file.seek(seek).map_err(|e| FlashError::Io(e))?;
+        match &mut self.file {
+            Some(file) => {
+                file.seek(seek).map_err(|e| FlashError::Io(e))?;
+            }
+            None => return Err(FlashError::WindowsHandle),
+        }
         Ok(())
     }
 }
 
-impl DeviceWriter for WindowsInterface {
+impl DeviceWriter for WindowsRawWriteHandle {
     type Handle = WindowsRawWriteHandle;
 
     /// Acquire and hold volume locks BEFORE opening the write handle.
@@ -215,32 +228,187 @@ impl DeviceWriter for WindowsInterface {
         let path = device.path.clone();
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
-
-        let volume_locks = unmount_volumes_on_drive_locked(&path)?;
-
         let path_str = path.to_string_lossy().to_string();
         let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
+        // for unmounting
+        let volume_locks = {
+            let unmount_handle = 'attempt: {
+                let mut last_error = FlashError::WindowsHandle;
+
+                for _ in 0..10 {
+                    unsafe {
+                        let handle_result = CreateFileW(
+                            PCWSTR(wide.as_ptr()),
+                            FILE_GENERIC_READ.0,
+                            FILE_SHARE_READ,
+                            None,
+                            OPEN_EXISTING,
+                            FILE_FLAGS_AND_ATTRIBUTES(0),
+                            None,
+                        );
+
+                        match handle_result {
+                            Ok(handle) if !handle.is_invalid() => {
+                                // Wrap it in your AutoCloseHandle and break out of the block with it
+                                break 'attempt Ok(AutoCloseHandle(handle));
+                            }
+                            _ => {
+                                // If it failed or the handle was invalid, we map the error
+                                // and let the loop try again
+                                last_error = FlashError::WindowsHandle;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // try with share write
+                for _ in 0..10 {
+                    unsafe {
+                        let handle_result = CreateFileW(
+                            PCWSTR(wide.as_ptr()),
+                            FILE_GENERIC_READ.0,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            None,
+                            OPEN_EXISTING,
+                            FILE_FLAGS_AND_ATTRIBUTES(0),
+                            None,
+                        );
+
+                        match handle_result {
+                            Ok(handle) if !handle.is_invalid() => {
+                                // Wrap it in your AutoCloseHandle and break out of the block with it
+                                break 'attempt Ok(AutoCloseHandle(handle));
+                            }
+                            _ => {
+                                // If it failed or the handle was invalid, we map the error
+                                // and let the loop try again
+                                last_error = FlashError::WindowsHandle;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // If the loop finishes all 20 attempts without success, return the error
+                Err(last_error)
+            }?;
+            if unmount_handle.0.is_invalid() {
+                return Err(FlashError::WindowsHandle);
+            }
+            // locks it
+            unsafe {
+                DeviceIoControl(
+                    unmount_handle.0,
+                    FSCTL_DISMOUNT_VOLUME,
+                    None,
+                    0,
+                    None,
+                    0,
+                    None,
+                    None,
+                )
+                .map_err(FlashError::WindowsError)?;
+            }
+            // remove letters
+            let volume_locks = unmount_volumes_on_drive_locked(&path)?;
+            // TODO: check later if needed or unmounting the letters is enough
+            // unsafe {
+            //     DeviceIoControl(
+            //         unmount_handle.0,
+            //         FSCTL_DISMOUNT_VOLUME,
+            //         None,
+            //         0,
+            //         None,
+            //         0,
+            //         None,
+            //         None,
+            //     )
+            //     .map_err(FlashError::WindowsError)?;
+            // }
+            // needs for opening later with write
+            drop(unmount_handle);
+            volume_locks
+        };
         // open the device
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+        let handle = 'attempt: {
+            let mut last_error = FlashError::WindowsHandle;
+
+            for _ in 0..10 {
+                unsafe {
+                    let handle_result = CreateFileW(
+                        PCWSTR(wide.as_ptr()),
+                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                        // allow for infos to get
+                        FILE_SHARE_READ,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_FLAGS_AND_ATTRIBUTES(0),
+                        None,
+                    );
+
+                    match handle_result {
+                        Ok(handle) if !handle.is_invalid() => {
+                            // Wrap it in your AutoCloseHandle and break out of the block with it
+                            break 'attempt Ok(AutoCloseHandle(handle));
+                        }
+                        _ => {
+                            // If it failed or the handle was invalid, we map the error
+                            // and let the loop try again
+                            last_error = FlashError::WindowsHandle;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // now share write
+            for _ in 0..10 {
+                unsafe {
+                    let handle_result = CreateFileW(
+                        PCWSTR(wide.as_ptr()),
+                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                        // allow for infos to get
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_FLAGS_AND_ATTRIBUTES(0),
+                        None,
+                    );
+
+                    match handle_result {
+                        Ok(handle) if !handle.is_invalid() => {
+                            // Wrap it in your AutoCloseHandle and break out of the block with it
+                            break 'attempt Ok(AutoCloseHandle(handle));
+                        }
+                        _ => {
+                            // If it failed or the handle was invalid, we map the error
+                            // and let the loop try again
+                            last_error = FlashError::WindowsHandle;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // If the loop finishes all 20 attempts without success, return the error
+            Err(last_error)
+        }?;
+
+        // from diskpart to give windows a refresh
+        unsafe {
+            DeviceIoControl(
+                handle.0,
+                IOCTL_DISK_UPDATE_PROPERTIES,
                 None,
-                OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
+                0,
+                None,
+                0,
+                None,
                 None,
             )
-            .map_err(FlashError::WindowsError)?
-        };
-        if handle.is_invalid() {
-            return Err(FlashError::WindowsHandle);
+            .map_err(FlashError::WindowsError)?;
         }
-
-        let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+        let file = unsafe { std::fs::File::from_raw_handle(handle.0.0) };
         Ok(WindowsRawWriteHandle {
-            file,
+            file: Some(file),
             sector_size,
             size_bytes,
             _volume_locks: volume_locks,
@@ -248,7 +416,7 @@ impl DeviceWriter for WindowsInterface {
     }
 }
 
-impl DeviceEnumerator for WindowsInterface {
+impl DeviceEnumerator for WindowsRawWriteHandle {
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
         tokio::task::spawn_blocking(|| {
             let wmi = WMIConnection::new()
@@ -267,9 +435,27 @@ impl DeviceEnumerator for WindowsInterface {
                         .as_deref()
                         .map(|m| m.contains("Removable"))
                         .unwrap_or(false);
+                    let path = PathBuf::from(&d.device_id);
+                    let device_placeholder = BlockDevice::new(
+                        String::new(),
+                        path.clone(),
+                        d.model.clone(),
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
+                    );
+
+                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
+                    let letters = get_drive_letters_for_drive(device_placeholder);
+                    let display_path = if letters.is_empty() {
+                        d.device_id.clone()
+                    } else {
+                        letters.join(", ")
+                    };
 
                     BlockDevice::new(
-                        PathBuf::from(&d.device_id),
+                        display_path,
+                        path,
                         d.model,
                         size_bytes,
                         is_removable,
@@ -285,29 +471,11 @@ impl DeviceEnumerator for WindowsInterface {
     }
 }
 
-impl DeviceEjector for WindowsInterface {
-    async fn eject(&self, device: &BlockDevice) -> FlashResult<()> {
-        let path = device.path.clone();
-        tokio::task::spawn_blocking(move || -> FlashResult<()> {
-            let path_str = path.to_string_lossy().to_string();
-            let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
-
-            let handle = unsafe {
-                CreateFileW(
-                    PCWSTR(wide.as_ptr()),
-                    (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_FLAGS_AND_ATTRIBUTES(0),
-                    None,
-                )
-                .map_err(FlashError::WindowsError)?
-            };
-
-            if handle.is_invalid() {
-                return Err(FlashError::SyncError);
-            }
+impl DeviceEjector for WindowsRawWriteHandle {
+    /// eject via **DeviceIoControl**
+    async fn eject(&self, _device: &BlockDevice) -> FlashResult<()> {
+        if let Some(file) = &self.file {
+            let handle = HANDLE(file.as_raw_handle());
             unsafe {
                 DeviceIoControl(
                     handle,
@@ -319,30 +487,20 @@ impl DeviceEjector for WindowsInterface {
                     None,
                     None,
                 )
-                .ok();
-                CloseHandle(handle).ok();
+                .map_err(FlashError::WindowsError)?;
             }
-            Ok(())
-        })
-        .await
-        .map_err(|e| FlashError::FilesystemError(e.to_string()))?
+            return Ok(());
+        }
+        Err(FlashError::WindowsGenericError)
     }
 }
 
-impl DeviceUnmounter for WindowsInterface {
-    /// Dismount every volume on the target physical drive.
+impl DeviceUnmounter for WindowsRawWriteHandle {
+    /// removed because of complex configureguration moved into [open_for_writing]
     ///
-    /// This mirrors the `removeDriveLetters` + volume-dismount sequence from
-    ///  1. Walk all system volumes via `FindFirstVolumeW` / `FindNextVolumeW`.
-    ///  2. Identify which physical drive each volume lives on using
-    ///     `IOCTL_STORAGE_GET_DEVICE_NUMBER`.
-    ///  3. For matching volumes: remove mount-point paths with
-    ///     `DeleteVolumeMountPointW`, then issue `FSCTL_DISMOUNT_VOLUME`.
-    async fn unmount(&self, device: &BlockDevice) -> FlashResult<()> {
-        let path = device.path.clone();
-        tokio::task::spawn_blocking(move || unmount_volumes_on_drive_locked(&path).map(|_| ()))
-            .await
-            .map_err(|_| FlashError::SyncError)?
+    /// **does nothing**
+    async fn unmount(&self, _device: &BlockDevice) -> FlashResult<()> {
+        Ok(())
     }
 }
 
@@ -589,7 +747,6 @@ fn process_single_volume(
     .map_err(|e| FlashError::FilesystemError(format!("Access denied opening volume: {e}")))?;
 
     let lock_guard = AutoCloseHandle(write_handle);
-    let mut bytes_returned = 0u32;
 
     let mut locked = false;
     for _ in 0..10 {
@@ -601,7 +758,7 @@ fn process_single_volume(
                 0,
                 None,
                 0,
-                Some(&mut bytes_returned),
+                None,
                 None,
             )
             .is_ok()
@@ -627,7 +784,7 @@ fn process_single_volume(
             0,
             None,
             0,
-            Some(&mut bytes_returned),
+            None,
             None,
         )
     }
@@ -681,7 +838,7 @@ fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<
         CreateFileW(
             PCWSTR(device_wide.as_ptr()),
             0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_SHARE_READ,
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -745,7 +902,7 @@ fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<
 
     Some(vol_letters)
 }
-impl AsyncDeviceEnumerator for WindowsInterface {
+impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
     type WatchStream = ReceiverStream<DeviceEvent>;
 
     async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
@@ -758,8 +915,6 @@ impl AsyncDeviceEnumerator for WindowsInterface {
                 return Ok(ReceiverStream::new(rx));
             }
         }
-
-        let enumerator = self.clone();
 
         tokio::spawn(async move {
             let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -800,7 +955,7 @@ impl AsyncDeviceEnumerator for WindowsInterface {
                 tokio::time::sleep(std::time::Duration::from_millis(750)).await;
 
                 // Re-scan active drives
-                let current_devices = match enumerator.list_devices().await {
+                let current_devices = match Self::list_devices().await {
                     Ok(d) => d,
                     Err(e) => {
                         tracing::warn!("Failed to re-enumerate devices during WMI wake: {e}");
@@ -834,5 +989,60 @@ impl AsyncDeviceEnumerator for WindowsInterface {
         });
 
         Ok(ReceiverStream::new(rx))
+    }
+}
+impl WindowsRawWriteHandle {
+    /// for that the trait can not be used, should be cleanup later
+    async fn list_devices() -> FlashResult<Vec<BlockDevice>> {
+        tokio::task::spawn_blocking(|| {
+            let wmi = WMIConnection::new()
+                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
+
+            let drives: Vec<Win32DiskDrive> = wmi
+                .query()
+                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
+
+            let devices = drives
+                .into_iter()
+                .map(|d| {
+                    let size_bytes = d.size.unwrap_or(0);
+                    let is_removable = d
+                        .media_type
+                        .as_deref()
+                        .map(|m| m.contains("Removable"))
+                        .unwrap_or(false);
+
+                    let path = PathBuf::from(&d.device_id);
+                    let device_placeholder = BlockDevice::new(
+                        String::new(),
+                        path.clone(),
+                        d.model.clone(),
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
+                    );
+
+                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
+                    let letters = get_drive_letters_for_drive(device_placeholder);
+                    let display_path = if letters.is_empty() {
+                        d.device_id.clone()
+                    } else {
+                        letters.join(", ")
+                    };
+                    BlockDevice::new(
+                        display_path,
+                        path,
+                        d.model,
+                        size_bytes,
+                        is_removable,
+                        d.bytes_per_sector as usize,
+                    )
+                })
+                .collect();
+
+            Ok(devices)
+        })
+        .await
+        .map_err(|_| FlashError::SyncError)?
     }
 }

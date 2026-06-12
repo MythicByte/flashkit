@@ -311,6 +311,7 @@ async fn fetch_disk_info(disk_identifier: &str) -> FlashResult<crate::data_types
         .to_string();
 
     Ok(crate::data_types::BlockDevice {
+        display_path: path.to_str().unwrap_or_default().to_string(),
         path,
         name,
         size_bytes,

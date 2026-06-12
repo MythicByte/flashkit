@@ -289,15 +289,27 @@ where
     where
         T::Handle: RawWriteHandle,
     {
+        const MB: usize = 1024 * 1024;
+        const MAX_BYTES_TO_CLEAR: usize = 8 * MB;
+        const MAX_BYTES_TO_CLEAR_END_OVERWRITE: usize = MB;
+        let pages = MAX_BYTES_TO_CLEAR / PageAlignedBuffer::get_page_size();
         // Deletes GPT backup header, the first is overwritten with the image later
-        let buffer = PageAlignedBuffer::new(1).expect("Failed to allocate buffer"); // SAFETY: Buffer is page-aligned and size is multiple of page size
+        let buffer = PageAlignedBuffer::new(pages).expect("Failed to allocate buffer"); // SAFETY: Buffer is page-aligned and size is multiple of page size
         let buffer_slice =
             unsafe { std::slice::from_raw_parts_mut(buffer.as_ptr(), buffer.size()) };
         buffer_slice.fill(0);
+        handle.write_at(0, &buffer_slice)?;
         // Wipe the backup GPT at the end of the disk
+        // let tail_clear_size = MAX_BYTES_TO_CLEAR / 8;
+        let tail_clear_size =
+            (MAX_BYTES_TO_CLEAR_END_OVERWRITE / PageAlignedBuffer::get_page_size()) + 1;
         let disk_size = handle.size_bytes()?;
-        let end_offset = disk_size.saturating_sub(buffer.size() as u64);
-        handle.write_at(end_offset, &buffer_slice)?;
+        let buffer_end =
+            PageAlignedBuffer::new(tail_clear_size).expect("Failed to allocate buffer"); // SAFETY: Buffer is page-aligned and size is multiple of page size
+        let buffer_end_slice =
+            unsafe { std::slice::from_raw_parts_mut(buffer_end.as_ptr(), buffer_end.size()) };
+        let end_offset = disk_size.saturating_sub(buffer_end.size() as u64);
+        handle.write_at(end_offset, &buffer_end_slice)?;
 
         handle.flush_to_disk()?;
         handle.seek(std::io::SeekFrom::Start(0))?;

@@ -46,6 +46,20 @@ impl PageAlignedBuffer {
         let pointer = NonNull::new(pointer).expect("Pointert error");
         Ok(Self { pointer, layout })
     }
+    /// Returns the system page size in bytes without allocating any memory.
+    #[cfg(unix)]
+    pub fn get_page_size() -> usize {
+        rustix::param::page_size()
+    }
+
+    /// Returns the system page size in bytes without allocating any memory.
+    #[cfg(target_os = "windows")]
+    pub fn get_page_size() -> usize {
+        // Safety: GetSystemInfo is always safe to call
+        let mut info = SYSTEM_INFO::default();
+        unsafe { GetSystemInfo(&mut info) };
+        info.dwPageSize as usize
+    }
     /// Returns the aligned pointer
     pub fn as_ptr(&self) -> *mut u8 {
         self.pointer.as_ptr()

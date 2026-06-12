@@ -278,6 +278,7 @@ async fn block_obj_to_device(
     let is_removable = drive_proxy.removable().await.unwrap_or(false);
 
     Ok(BlockDevice {
+        display_path: path.to_str().unwrap_or_default().to_string(),
         path,
         name,
         size_bytes,
@@ -330,6 +331,7 @@ impl DeviceEnumerator for LinuxDBus {
             let is_removable = drive_proxy.removable().await.unwrap_or(false);
 
             let bd = BlockDevice {
+                display_path: path.to_str().unwrap_or_default().to_string(),
                 path,
                 name,
                 size_bytes,

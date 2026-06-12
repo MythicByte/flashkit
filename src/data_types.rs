@@ -9,6 +9,8 @@ use std::{
 /// Storage Device
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BlockDevice {
+    /// path which can be shown to the user, on unix devices the path and on windows the drive letter
+    pub display_path: String,
     /// Platform-native path: /dev/sdb, /dev/rdisk2, \\.\PhysicalDrive1
     pub path: PathBuf,
     /// Human readable name: "Samsung USB Drive"
@@ -108,6 +110,7 @@ impl BlockDevice {
     /// constructor
     #[must_use]
     pub fn new(
+        display_path: String,
         path: PathBuf,
         name: String,
         size_bytes: u64,
@@ -115,6 +118,7 @@ impl BlockDevice {
         sector_size: usize,
     ) -> Self {
         Self {
+            display_path,
             path,
             name,
             size_bytes,
