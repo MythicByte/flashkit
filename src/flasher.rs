@@ -208,6 +208,9 @@ where
             )
             .await?;
 
+        info!("Verifyer finished");
+        // deactive it for windows, crashed makes no sense deactivate is a bit of extra on top not needed
+        #[cfg(not(target_os = "windows"))]
         self.interface.eject(device).await?;
 
         sender
