@@ -72,6 +72,8 @@ use windows::{
             FindFirstVolumeW,
             FindNextVolumeW,
             FindVolumeClose,
+            GetDriveTypeW,
+            GetLogicalDrives,
             GetVolumePathNamesForVolumeNameW,
             IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
             OPEN_EXISTING,
@@ -994,33 +996,6 @@ impl WindowsRawWriteHandle {
             // for next device
             index_get_device_number += 1;
 
-            let name = {
-                let mut buffer = [0u16; 260];
-                let check = unsafe {
-                    SetupDiGetDeviceRegistryPropertyW(
-                        devices,
-                        &info_holder,
-                        SPDRP_ENUMERATOR_NAME,
-                        None,
-                        Some(std::slice::from_raw_parts_mut(
-                            // reinterpret u16 buffer as &mut [u8]
-                            buffer.as_mut_ptr() as *mut u8,
-                            std::mem::size_of_val(&buffer), // 260 * 2 = 520 bytes
-                        )),
-                        None,
-                    )
-                };
-                match check {
-                    Ok(_) => {
-                        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
-                        String::from_utf16_lossy(&buffer.get(..end).unwrap_or_default())
-                    }
-                    Err(_) => String::new(),
-                }
-            };
-            if name.is_empty() {
-                continue;
-            }
             let is_removable = {
                 let mut status_give = CM_REMOVAL_POLICY(0u32);
                 let check = unsafe {
@@ -1045,7 +1020,7 @@ impl WindowsRawWriteHandle {
                     Err(_) => false,
                 }
             };
-            let display_path = {
+            let name = {
                 let mut buffer = [0u16; 260];
                 let check = unsafe {
                     SetupDiGetDeviceRegistryPropertyW(
@@ -1069,6 +1044,10 @@ impl WindowsRawWriteHandle {
                     Err(_) => String::new(),
                 }
             };
+            if name.is_empty() {
+                continue;
+            }
+            let display_path = "Holder".to_string();
             let mut interface_data = SP_DEVICE_INTERFACE_DATA {
                 cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
                 ..Default::default()
@@ -1204,7 +1183,9 @@ impl WindowsRawWriteHandle {
                     opened_device,
                 )
             };
-            let path = {
+            // ... (previous ioctl fetching for size_bytes, sector_size)
+
+            let (path, disk_number) = {
                 let mut disk_number: i32 = -1;
                 let mut size: u32 = 0;
 
@@ -1257,8 +1238,19 @@ impl WindowsRawWriteHandle {
 
                 let path_string = format!(r"\\.\PhysicalDrive{}", disk_number);
 
-                std::path::PathBuf::from(path_string)
+                (std::path::PathBuf::from(path_string), disk_number)
             };
+
+            // Calculate the display path (Drive letters)
+            let mountpoints = get_logical_mountpoints(disk_number as u32);
+            let display_path = if mountpoints.is_empty() {
+                // what is better things empty is is more usefull for the user
+                // String::from("Unmounted")
+                String::from("")
+            } else {
+                mountpoints.join(", ") // Formats multiple partitions as "D:\, E:\"
+            };
+
             output.push(BlockDevice::new(
                 display_path,
                 path,
@@ -1268,8 +1260,66 @@ impl WindowsRawWriteHandle {
                 sector_size,
             ));
         }
-        // drops handle
         let _ = unsafe { SetupDiDestroyDeviceInfoList(devices) };
         Ok(output)
     }
+}
+/// Iterates logical drives (A-Z) and returns the drive letters mapped to the given physical disk.
+fn get_logical_mountpoints(target_disk_number: u32) -> Vec<String> {
+    let mut mountpoints = Vec::new();
+
+    // Get a bitmask of all available logical drives (A=1, B=2, C=4, etc.)
+    let logical_drives_mask = unsafe { GetLogicalDrives() };
+    if logical_drives_mask == 0 {
+        return mountpoints;
+    }
+
+    for i in 0..26 {
+        if (logical_drives_mask & (1 << i)) != 0 {
+            let letter = (b'A' + i) as char;
+            let root_path = format!("{}:\\", letter);
+            let root_wide: Vec<u16> = root_path.encode_utf16().chain(std::iter::once(0)).collect();
+
+            // Only check fixed or removable drives (ignore CD-ROMs, RAM disks, network drives)
+            let drive_type = unsafe { GetDriveTypeW(PCWSTR(root_wide.as_ptr())) };
+            if drive_type != windows::Win32::System::WindowsProgramming::DRIVE_FIXED
+                && drive_type != windows::Win32::System::WindowsProgramming::DRIVE_REMOVABLE
+            {
+                continue;
+            }
+
+            // Open a handle to the logical volume (e.g., "\\.\C:")
+            let device_path = format!(r"\\.\{}:", letter);
+            let device_wide: Vec<u16> = device_path
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let handle = unsafe {
+                CreateFileW(
+                    PCWSTR(device_wide.as_ptr()),
+                    0, // 0 is enough to query metadata; avoids needing Admin write privileges
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+            };
+
+            if let Ok(h) = handle {
+                if !h.is_invalid() {
+                    let auto_handle = AutoCloseHandle(h);
+                    // Use your existing helper to extract the physical disk number
+                    if let Some(disk_num) = storage_device_number(auto_handle.0) {
+                        if disk_num == target_disk_number {
+                            mountpoints.push(root_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    mountpoints
 }
