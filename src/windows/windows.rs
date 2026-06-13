@@ -13,6 +13,7 @@ use crate::{
 use serde::Deserialize;
 use std::{
     collections::HashSet,
+    ffi::c_void,
     io::{
         Seek,
         SeekFrom,
@@ -36,6 +37,24 @@ use std::{
 use tokio_stream::wrappers::ReceiverStream;
 use windows::{
     Win32::{
+        Devices::DeviceAndDriverInstallation::{
+            CM_REMOVAL_POLICY,
+            CM_REMOVAL_POLICY_EXPECT_ORDERLY_REMOVAL,
+            CM_REMOVAL_POLICY_EXPECT_SURPRISE_REMOVAL,
+            DIGCF_DEVICEINTERFACE,
+            DIGCF_PRESENT,
+            SP_DEVICE_INTERFACE_DATA,
+            SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+            SP_DEVINFO_DATA,
+            SPDRP_ENUMERATOR_NAME,
+            SPDRP_FRIENDLYNAME,
+            SPDRP_REMOVAL_POLICY,
+            SetupDiDestroyDeviceInfoList,
+            SetupDiEnumDeviceInfo,
+            SetupDiGetClassDevsW,
+            SetupDiGetDeviceInterfaceDetailW,
+            SetupDiGetDeviceRegistryPropertyW,
+        },
         Foundation::{
             CloseHandle,
             HANDLE,
@@ -43,6 +62,7 @@ use windows::{
         Storage::FileSystem::{
             CreateFileW,
             DeleteVolumeMountPointW,
+            FILE_ATTRIBUTE_NORMAL,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
@@ -58,21 +78,22 @@ use windows::{
         System::{
             IO::DeviceIoControl,
             Ioctl::{
+                DISK_GEOMETRY_EX,
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
+                GUID_DEVINTERFACE_DISK,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
                 IOCTL_DISK_UPDATE_PROPERTIES,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
+                VOLUME_DISK_EXTENTS,
             },
         },
     },
     core::PCWSTR,
 };
-use wmi::{
-    WMIConnection,
-    WMIError,
-};
+use wmi::WMIConnection;
 
 use crate::traits::{
     DeviceEjector,
@@ -418,56 +439,229 @@ impl DeviceWriter for WindowsRawWriteHandle {
 
 impl DeviceEnumerator for WindowsRawWriteHandle {
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
-        tokio::task::spawn_blocking(|| {
-            let wmi = WMIConnection::new()
-                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
+        let mut output = Vec::new();
+        let devices = unsafe {
+            // get all devices
+            SetupDiGetClassDevsW(
+                Some(&GUID_DEVINTERFACE_DISK),
+                None,
+                None,
+                DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+            )
+        }
+        .map_err(FlashError::WindowsError)?;
+        // check handle
+        if devices.is_invalid() {
+            return Err(FlashError::WindowsGenericError);
+        }
+        let mut index_get_device_number = 0;
+        // the cbSize is needed from the docs [check]: https://learn.microsoft.com/de-de/windows/win32/api/setupapi/nf-setupapi-setupdienumdeviceinfo
+        let mut info_holder = SP_DEVINFO_DATA {
+            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+        while let Ok(_) =
+            unsafe { SetupDiEnumDeviceInfo(devices, index_get_device_number, &mut info_holder) }
+        {
+            // for next device
+            index_get_device_number += 1;
 
-            let drives: Vec<Win32DiskDrive> = wmi
-                .query()
-                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
-
-            let devices = drives
-                .into_iter()
-                .map(|d| {
-                    let size_bytes = d.size.unwrap_or(0);
-                    let is_removable = d
-                        .media_type
-                        .as_deref()
-                        .map(|m| m.contains("Removable"))
-                        .unwrap_or(false);
-                    let path = PathBuf::from(&d.device_id);
-                    let device_placeholder = BlockDevice::new(
-                        String::new(),
-                        path.clone(),
-                        d.model.clone(),
-                        size_bytes,
-                        is_removable,
-                        d.bytes_per_sector as usize,
-                    );
-
-                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
-                    let letters = get_drive_letters_for_drive(device_placeholder);
-                    let display_path = if letters.is_empty() {
-                        d.device_id.clone()
-                    } else {
-                        letters.join(", ")
-                    };
-
-                    BlockDevice::new(
-                        display_path,
-                        path,
-                        d.model,
-                        size_bytes,
-                        is_removable,
-                        d.bytes_per_sector as usize,
+            let name = {
+                let mut buffer = [0u16; 260];
+                let check = unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices,
+                        &info_holder,
+                        SPDRP_ENUMERATOR_NAME,
+                        None,
+                        Some(std::slice::from_raw_parts_mut(
+                            // reinterpret u16 buffer as &mut [u8]
+                            buffer.as_mut_ptr() as *mut u8,
+                            std::mem::size_of_val(&buffer), // 260 * 2 = 520 bytes
+                        )),
+                        None,
                     )
-                })
-                .collect();
+                };
+                match check {
+                    Ok(_) => {
+                        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+                        String::from_utf16_lossy(&buffer.get(..end).unwrap_or_default())
+                    }
+                    Err(_) => String::new(),
+                }
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let is_removable = {
+                let mut status_give = CM_REMOVAL_POLICY(0u32);
+                let check = unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices,
+                        &info_holder,
+                        SPDRP_REMOVAL_POLICY,
+                        None,
+                        Some(std::slice::from_raw_parts_mut(
+                            &mut status_give as *mut CM_REMOVAL_POLICY as *mut u8, // cast newtype ptr
+                            std::mem::size_of::<CM_REMOVAL_POLICY>(),
+                        )),
+                        None,
+                    )
+                };
+                match check {
+                    Ok(_) => matches!(
+                        status_give,
+                        CM_REMOVAL_POLICY_EXPECT_ORDERLY_REMOVAL
+                            | CM_REMOVAL_POLICY_EXPECT_SURPRISE_REMOVAL
+                    ),
+                    Err(_) => false,
+                }
+            };
+            let display_path = {
+                let mut buffer = [0u16; 260];
+                let check = unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices,
+                        &info_holder,
+                        SPDRP_FRIENDLYNAME,
+                        None,
+                        Some(std::slice::from_raw_parts_mut(
+                            // reinterpret u16 buffer as &mut [u8]
+                            buffer.as_mut_ptr() as *mut u8,
+                            std::mem::size_of_val(&buffer), // 260 * 2 = 520 bytes
+                        )),
+                        None,
+                    )
+                };
+                match check {
+                    Ok(_) => {
+                        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+                        String::from_utf16_lossy(&buffer.get(..end).unwrap_or_default())
+                    }
+                    Err(_) => String::new(),
+                }
+            };
+            let path_to_access = {
+                let deviceinterfacedata = SP_DEVICE_INTERFACE_DATA::default();
+                let mut requiredsize: u32 = std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+                let mut detail = SP_DEVICE_INTERFACE_DETAIL_DATA_W::default();
+                detail.cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+                let _ = unsafe {
+                    SetupDiGetDeviceInterfaceDetailW(
+                        devices,
+                        &deviceinterfacedata,
+                        Some(&mut detail),
+                        0,
+                        Some(&mut requiredsize),
+                        None,
+                    )
+                };
+                detail
+            };
 
-            Ok(devices)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)?
+            let (size_bytes, sector_size, opened_device) = {
+                let mut info_back: u32 = 0;
+                let mut geometry = DISK_GEOMETRY_EX::default();
+                let out_buffer_size = std::mem::size_of::<DISK_GEOMETRY_EX>() as u32;
+
+                let opened_device = unsafe {
+                    CreateFileW(
+                        windows::core::PCWSTR(path_to_access.DevicePath.as_ptr()),
+                        0,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL,
+                        None,
+                    )
+                }
+                .map(|x| AutoCloseHandle(x))
+                .map_err(|_| FlashError::WindowsHandle)?;
+                let _ = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                        None,
+                        0,
+                        Some((&mut geometry) as *mut _ as *mut c_void),
+                        out_buffer_size,
+                        Some(&mut info_back),
+                        None,
+                    )
+                };
+                (
+                    geometry.DiskSize as u64,
+                    geometry.Geometry.BytesPerSector as usize,
+                    opened_device,
+                )
+            };
+            let path = {
+                let mut disk_number: i32 = -1;
+                let mut size: u32 = 0;
+
+                let mut disk_extents = VOLUME_DISK_EXTENTS::default();
+                let res1 = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                        None,
+                        0,
+                        Some(&mut disk_extents as *mut VOLUME_DISK_EXTENTS as *mut _),
+                        std::mem::size_of::<VOLUME_DISK_EXTENTS>() as u32,
+                        Some(&mut size),
+                        None,
+                    )
+                };
+
+                if res1.is_ok() && disk_extents.NumberOfDiskExtents > 0 {
+                    // Ignore RAIDs if there are 2 or more extents
+                    if disk_extents.NumberOfDiskExtents >= 2 {
+                        disk_number = -1;
+                    } else {
+                        // Grab the disk number from the first extent element
+                        disk_number = disk_extents.Extents[0].DiskNumber as i32;
+                    }
+                }
+
+                let mut device_number = STORAGE_DEVICE_NUMBER::default();
+                let res2 = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                        None,
+                        0,
+                        Some(&mut device_number as *mut STORAGE_DEVICE_NUMBER as *mut _),
+                        std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
+                        Some(&mut size),
+                        None,
+                    )
+                };
+
+                if res2.is_ok() {
+                    disk_number = device_number.DeviceNumber as i32;
+                }
+
+                // If both failed or it's a RAID, you can skip this device loop iteration
+                if disk_number == -1 {
+                    continue;
+                }
+
+                let path_string = format!(r"\\.\PhysicalDrive{}", disk_number);
+
+                std::path::PathBuf::from(path_string)
+            };
+            output.push(BlockDevice::new(
+                display_path,
+                path,
+                name,
+                size_bytes,
+                is_removable,
+                sector_size,
+            ));
+        }
+        // drops handle
+        let _ = unsafe { SetupDiDestroyDeviceInfoList(devices) };
+        Ok(output)
     }
 }
 
@@ -994,55 +1188,228 @@ impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
 impl WindowsRawWriteHandle {
     /// for that the trait can not be used, should be cleanup later
     async fn list_devices() -> FlashResult<Vec<BlockDevice>> {
-        tokio::task::spawn_blocking(|| {
-            let wmi = WMIConnection::new()
-                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
+        let mut output = Vec::new();
+        let devices = unsafe {
+            // get all devices
+            SetupDiGetClassDevsW(
+                Some(&GUID_DEVINTERFACE_DISK),
+                None,
+                None,
+                DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+            )
+        }
+        .map_err(FlashError::WindowsError)?;
+        // check handle
+        if devices.is_invalid() {
+            return Err(FlashError::WindowsGenericError);
+        }
+        let mut index_get_device_number = 0;
+        // the cbSize is needed from the docs [check]: https://learn.microsoft.com/de-de/windows/win32/api/setupapi/nf-setupapi-setupdienumdeviceinfo
+        let mut info_holder = SP_DEVINFO_DATA {
+            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+        while let Ok(_) =
+            unsafe { SetupDiEnumDeviceInfo(devices, index_get_device_number, &mut info_holder) }
+        {
+            // for next device
+            index_get_device_number += 1;
 
-            let drives: Vec<Win32DiskDrive> = wmi
-                .query()
-                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
-
-            let devices = drives
-                .into_iter()
-                .map(|d| {
-                    let size_bytes = d.size.unwrap_or(0);
-                    let is_removable = d
-                        .media_type
-                        .as_deref()
-                        .map(|m| m.contains("Removable"))
-                        .unwrap_or(false);
-
-                    let path = PathBuf::from(&d.device_id);
-                    let device_placeholder = BlockDevice::new(
-                        String::new(),
-                        path.clone(),
-                        d.model.clone(),
-                        size_bytes,
-                        is_removable,
-                        d.bytes_per_sector as usize,
-                    );
-
-                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
-                    let letters = get_drive_letters_for_drive(device_placeholder);
-                    let display_path = if letters.is_empty() {
-                        d.device_id.clone()
-                    } else {
-                        letters.join(", ")
-                    };
-                    BlockDevice::new(
-                        display_path,
-                        path,
-                        d.model,
-                        size_bytes,
-                        is_removable,
-                        d.bytes_per_sector as usize,
+            let name = {
+                let mut buffer = [0u16; 260];
+                let check = unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices,
+                        &info_holder,
+                        SPDRP_ENUMERATOR_NAME,
+                        None,
+                        Some(std::slice::from_raw_parts_mut(
+                            // reinterpret u16 buffer as &mut [u8]
+                            buffer.as_mut_ptr() as *mut u8,
+                            std::mem::size_of_val(&buffer), // 260 * 2 = 520 bytes
+                        )),
+                        None,
                     )
-                })
-                .collect();
+                };
+                match check {
+                    Ok(_) => {
+                        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+                        String::from_utf16_lossy(&buffer.get(..end).unwrap_or_default())
+                    }
+                    Err(_) => String::new(),
+                }
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let is_removable = {
+                let mut status_give = CM_REMOVAL_POLICY(0u32);
+                let check = unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices,
+                        &info_holder,
+                        SPDRP_REMOVAL_POLICY,
+                        None,
+                        Some(std::slice::from_raw_parts_mut(
+                            &mut status_give as *mut CM_REMOVAL_POLICY as *mut u8, // cast newtype ptr
+                            std::mem::size_of::<CM_REMOVAL_POLICY>(),
+                        )),
+                        None,
+                    )
+                };
+                match check {
+                    Ok(_) => matches!(
+                        status_give,
+                        CM_REMOVAL_POLICY_EXPECT_ORDERLY_REMOVAL
+                            | CM_REMOVAL_POLICY_EXPECT_SURPRISE_REMOVAL
+                    ),
+                    Err(_) => false,
+                }
+            };
+            let display_path = {
+                let mut buffer = [0u16; 260];
+                let check = unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices,
+                        &info_holder,
+                        SPDRP_FRIENDLYNAME,
+                        None,
+                        Some(std::slice::from_raw_parts_mut(
+                            // reinterpret u16 buffer as &mut [u8]
+                            buffer.as_mut_ptr() as *mut u8,
+                            std::mem::size_of_val(&buffer), // 260 * 2 = 520 bytes
+                        )),
+                        None,
+                    )
+                };
+                match check {
+                    Ok(_) => {
+                        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+                        String::from_utf16_lossy(&buffer.get(..end).unwrap_or_default())
+                    }
+                    Err(_) => String::new(),
+                }
+            };
+            let path_to_access = {
+                let deviceinterfacedata = SP_DEVICE_INTERFACE_DATA::default();
+                let mut requiredsize: u32 = std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+                let mut detail = SP_DEVICE_INTERFACE_DETAIL_DATA_W::default();
+                detail.cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+                let _ = unsafe {
+                    SetupDiGetDeviceInterfaceDetailW(
+                        devices,
+                        &deviceinterfacedata,
+                        Some(&mut detail),
+                        0,
+                        Some(&mut requiredsize),
+                        None,
+                    )
+                };
+                detail
+            };
 
-            Ok(devices)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)?
+            let (size_bytes, sector_size, opened_device) = {
+                let mut info_back: u32 = 0;
+                let mut geometry = DISK_GEOMETRY_EX::default();
+                let out_buffer_size = std::mem::size_of::<DISK_GEOMETRY_EX>() as u32;
+
+                let opened_device = unsafe {
+                    CreateFileW(
+                        windows::core::PCWSTR(path_to_access.DevicePath.as_ptr()),
+                        0,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL,
+                        None,
+                    )
+                }
+                .map(|x| AutoCloseHandle(x))
+                .map_err(|_| FlashError::WindowsHandle)?;
+                let _ = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                        None,
+                        0,
+                        Some((&mut geometry) as *mut _ as *mut c_void),
+                        out_buffer_size,
+                        Some(&mut info_back),
+                        None,
+                    )
+                };
+                (
+                    geometry.DiskSize as u64,
+                    geometry.Geometry.BytesPerSector as usize,
+                    opened_device,
+                )
+            };
+            let path = {
+                let mut disk_number: i32 = -1;
+                let mut size: u32 = 0;
+
+                let mut disk_extents = VOLUME_DISK_EXTENTS::default();
+                let res1 = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                        None,
+                        0,
+                        Some(&mut disk_extents as *mut VOLUME_DISK_EXTENTS as *mut _),
+                        std::mem::size_of::<VOLUME_DISK_EXTENTS>() as u32,
+                        Some(&mut size),
+                        None,
+                    )
+                };
+
+                if res1.is_ok() && disk_extents.NumberOfDiskExtents > 0 {
+                    // Ignore RAIDs if there are 2 or more extents
+                    if disk_extents.NumberOfDiskExtents >= 2 {
+                        disk_number = -1;
+                    } else {
+                        // Grab the disk number from the first extent element
+                        disk_number = disk_extents.Extents[0].DiskNumber as i32;
+                    }
+                }
+
+                let mut device_number = STORAGE_DEVICE_NUMBER::default();
+                let res2 = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                        None,
+                        0,
+                        Some(&mut device_number as *mut STORAGE_DEVICE_NUMBER as *mut _),
+                        std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
+                        Some(&mut size),
+                        None,
+                    )
+                };
+
+                if res2.is_ok() {
+                    disk_number = device_number.DeviceNumber as i32;
+                }
+
+                // If both failed or it's a RAID, you can skip this device loop iteration
+                if disk_number == -1 {
+                    continue;
+                }
+
+                let path_string = format!(r"\\.\PhysicalDrive{}", disk_number);
+
+                std::path::PathBuf::from(path_string)
+            };
+            output.push(BlockDevice::new(
+                display_path,
+                path,
+                name,
+                size_bytes,
+                is_removable,
+                sector_size,
+            ));
+        }
+        // drops handle
+        let _ = unsafe { SetupDiDestroyDeviceInfoList(devices) };
+        Ok(output)
     }
 }
