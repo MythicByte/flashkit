@@ -10,9 +10,9 @@ use crate::{
     },
     traits::AsyncDeviceEnumerator,
 };
-use serde::Deserialize;
 use std::{
     collections::HashSet,
+    ffi::c_void,
     io::{
         Seek,
         SeekFrom,
@@ -36,6 +36,24 @@ use std::{
 use tokio_stream::wrappers::ReceiverStream;
 use windows::{
     Win32::{
+        Devices::DeviceAndDriverInstallation::{
+            CM_REMOVAL_POLICY,
+            CM_REMOVAL_POLICY_EXPECT_ORDERLY_REMOVAL,
+            CM_REMOVAL_POLICY_EXPECT_SURPRISE_REMOVAL,
+            DIGCF_DEVICEINTERFACE,
+            DIGCF_PRESENT,
+            SP_DEVICE_INTERFACE_DATA,
+            SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+            SP_DEVINFO_DATA,
+            SPDRP_FRIENDLYNAME,
+            SPDRP_REMOVAL_POLICY,
+            SetupDiDestroyDeviceInfoList,
+            SetupDiEnumDeviceInfo,
+            SetupDiEnumDeviceInterfaces,
+            SetupDiGetClassDevsW,
+            SetupDiGetDeviceInterfaceDetailW,
+            SetupDiGetDeviceRegistryPropertyW,
+        },
         Foundation::{
             CloseHandle,
             HANDLE,
@@ -43,6 +61,7 @@ use windows::{
         Storage::FileSystem::{
             CreateFileW,
             DeleteVolumeMountPointW,
+            FILE_ATTRIBUTE_NORMAL,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_GENERIC_READ,
             FILE_GENERIC_WRITE,
@@ -51,6 +70,8 @@ use windows::{
             FindFirstVolumeW,
             FindNextVolumeW,
             FindVolumeClose,
+            GetDriveTypeW,
+            GetLogicalDrives,
             GetVolumePathNamesForVolumeNameW,
             IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
             OPEN_EXISTING,
@@ -58,20 +79,20 @@ use windows::{
         System::{
             IO::DeviceIoControl,
             Ioctl::{
+                DISK_GEOMETRY_EX,
                 FSCTL_DISMOUNT_VOLUME,
                 FSCTL_LOCK_VOLUME,
+                GUID_DEVINTERFACE_DISK,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
                 IOCTL_DISK_UPDATE_PROPERTIES,
                 IOCTL_STORAGE_EJECT_MEDIA,
                 IOCTL_STORAGE_GET_DEVICE_NUMBER,
                 STORAGE_DEVICE_NUMBER,
+                VOLUME_DISK_EXTENTS,
             },
         },
     },
     core::PCWSTR,
-};
-use wmi::{
-    WMIConnection,
-    WMIError,
 };
 
 use crate::traits::{
@@ -141,17 +162,6 @@ impl Drop for VolumeFindHandle {
     fn drop(&mut self) {
         unsafe { FindVolumeClose(self.0).ok() };
     }
-}
-#[derive(Deserialize)]
-#[serde(rename = "Win32_DiskDrive")]
-#[serde(rename_all = "PascalCase")]
-struct Win32DiskDrive {
-    #[serde(rename = "DeviceID")]
-    device_id: String, // "\\.\PhysicalDrive0"
-    model: String, // "Samsung USB Drive"
-    size: Option<u64>,
-    bytes_per_sector: u32,
-    media_type: Option<String>, // "Removable Media" / "Fixed hard disk media"
 }
 
 #[allow(missing_docs)]
@@ -418,56 +428,7 @@ impl DeviceWriter for WindowsRawWriteHandle {
 
 impl DeviceEnumerator for WindowsRawWriteHandle {
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>> {
-        tokio::task::spawn_blocking(|| {
-            let wmi = WMIConnection::new()
-                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
-
-            let drives: Vec<Win32DiskDrive> = wmi
-                .query()
-                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
-
-            let devices = drives
-                .into_iter()
-                .map(|d| {
-                    let size_bytes = d.size.unwrap_or(0);
-                    let is_removable = d
-                        .media_type
-                        .as_deref()
-                        .map(|m| m.contains("Removable"))
-                        .unwrap_or(false);
-                    let path = PathBuf::from(&d.device_id);
-                    let device_placeholder = BlockDevice::new(
-                        String::new(),
-                        path.clone(),
-                        d.model.clone(),
-                        size_bytes,
-                        is_removable,
-                        d.bytes_per_sector as usize,
-                    );
-
-                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
-                    let letters = get_drive_letters_for_drive(device_placeholder);
-                    let display_path = if letters.is_empty() {
-                        d.device_id.clone()
-                    } else {
-                        letters.join(", ")
-                    };
-
-                    BlockDevice::new(
-                        display_path,
-                        path,
-                        d.model,
-                        size_bytes,
-                        is_removable,
-                        d.bytes_per_sector as usize,
-                    )
-                })
-                .collect();
-
-            Ok(devices)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)?
+        Self::list_devices().await
     }
 }
 
@@ -907,7 +868,8 @@ impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
 
     async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        //  Fetch current devices and send them immediately
+
+        // Fetch current devices and send them immediately
         let initial_devices = self.list_devices().await?;
 
         for dev in initial_devices.clone() {
@@ -917,48 +879,19 @@ impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
         }
 
         tokio::spawn(async move {
-            let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel();
-
-            tokio::task::spawn_blocking(move || {
-                let wmi_con = match WMIConnection::new() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!("WMI connection failed: {e}");
-                        return;
-                    }
-                };
-
-                // Query listens for creations, deletions, and modifications of Disk Drives
-                let query = "SELECT * FROM __InstanceOperationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_DiskDrive'";
-
-                let iterator = match wmi_con.exec_notification_query(query) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        tracing::error!("WMI query failed: {e}");
-                        return;
-                    }
-                };
-
-                // Iterate over notifications natively provided by the crate
-                for _event in iterator {
-                    if wake_tx.send(()).is_err() {
-                        break; // The receiver was dropped, shut down the thread
-                    }
-                }
-            });
-
             let mut known_paths: HashSet<PathBuf> =
                 initial_devices.into_iter().map(|d| d.path).collect();
 
-            while wake_rx.recv().await.is_some() {
-                // A slight delay ensures Windows Volume Manager finishes mounting operations
-                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            // Polling loop replacing WMI
+            loop {
+                // Adjust the polling interval to your preference.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
                 // Re-scan active drives
                 let current_devices = match Self::list_devices().await {
                     Ok(d) => d,
                     Err(e) => {
-                        tracing::warn!("Failed to re-enumerate devices during WMI wake: {e}");
+                        tracing::warn!("Failed to re-enumerate devices during polling: {e}");
                         continue;
                     }
                 };
@@ -982,7 +915,7 @@ impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
                 for path in removed_paths {
                     known_paths.remove(&path);
                     if tx.send(DeviceEvent::Removed(path)).await.is_err() {
-                        return;
+                        return; // Receiver was dropped, exit task cleanly
                     }
                 }
             }
@@ -994,55 +927,357 @@ impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
 impl WindowsRawWriteHandle {
     /// for that the trait can not be used, should be cleanup later
     async fn list_devices() -> FlashResult<Vec<BlockDevice>> {
-        tokio::task::spawn_blocking(|| {
-            let wmi = WMIConnection::new()
-                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
+        let mut output = Vec::new();
+        let devices = unsafe {
+            // get all devices
+            SetupDiGetClassDevsW(
+                Some(&GUID_DEVINTERFACE_DISK),
+                None,
+                None,
+                DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+            )
+        }
+        .map_err(FlashError::WindowsError)?;
+        // check handle
+        if devices.is_invalid() {
+            return Err(FlashError::WindowsGenericError);
+        }
+        let mut index_get_device_number = 0;
+        // the cbSize is needed from the docs [check]: https://learn.microsoft.com/de-de/windows/win32/api/setupapi/nf-setupapi-setupdienumdeviceinfo
+        let mut info_holder = SP_DEVINFO_DATA {
+            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+        while let Ok(_) =
+            unsafe { SetupDiEnumDeviceInfo(devices, index_get_device_number, &mut info_holder) }
+        {
+            // for next device
+            index_get_device_number += 1;
 
-            let drives: Vec<Win32DiskDrive> = wmi
-                .query()
-                .map_err(|e: WMIError| FlashError::FilesystemError(e.to_string()))?;
-
-            let devices = drives
-                .into_iter()
-                .map(|d| {
-                    let size_bytes = d.size.unwrap_or(0);
-                    let is_removable = d
-                        .media_type
-                        .as_deref()
-                        .map(|m| m.contains("Removable"))
-                        .unwrap_or(false);
-
-                    let path = PathBuf::from(&d.device_id);
-                    let device_placeholder = BlockDevice::new(
-                        String::new(),
-                        path.clone(),
-                        d.model.clone(),
-                        size_bytes,
-                        is_removable,
-                        d.bytes_per_sector as usize,
-                    );
-
-                    // Fetch actual drive letters (e.g. ["G:\", "H:\"])
-                    let letters = get_drive_letters_for_drive(device_placeholder);
-                    let display_path = if letters.is_empty() {
-                        d.device_id.clone()
-                    } else {
-                        letters.join(", ")
-                    };
-                    BlockDevice::new(
-                        display_path,
-                        path,
-                        d.model,
-                        size_bytes,
-                        is_removable,
-                        d.bytes_per_sector as usize,
+            let is_removable = {
+                let mut status_give = CM_REMOVAL_POLICY(0u32);
+                let check = unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices,
+                        &info_holder,
+                        SPDRP_REMOVAL_POLICY,
+                        None,
+                        Some(std::slice::from_raw_parts_mut(
+                            &mut status_give as *mut CM_REMOVAL_POLICY as *mut u8, // cast newtype ptr
+                            std::mem::size_of::<CM_REMOVAL_POLICY>(),
+                        )),
+                        None,
                     )
-                })
+                };
+                match check {
+                    Ok(_) => matches!(
+                        status_give,
+                        CM_REMOVAL_POLICY_EXPECT_ORDERLY_REMOVAL
+                            | CM_REMOVAL_POLICY_EXPECT_SURPRISE_REMOVAL
+                    ),
+                    Err(_) => false,
+                }
+            };
+            let name = {
+                let mut buffer = [0u16; 260];
+                let check = unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices,
+                        &info_holder,
+                        SPDRP_FRIENDLYNAME,
+                        None,
+                        Some(std::slice::from_raw_parts_mut(
+                            // reinterpret u16 buffer as &mut [u8]
+                            buffer.as_mut_ptr() as *mut u8,
+                            std::mem::size_of_val(&buffer), // 260 * 2 = 520 bytes
+                        )),
+                        None,
+                    )
+                };
+                match check {
+                    Ok(_) => {
+                        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+                        String::from_utf16_lossy(&buffer.get(..end).unwrap_or_default())
+                    }
+                    Err(_) => String::new(),
+                }
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let display_path = "Holder".to_string();
+            let mut interface_data = SP_DEVICE_INTERFACE_DATA {
+                cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+                ..Default::default()
+            };
+            if unsafe {
+                SetupDiEnumDeviceInterfaces(
+                    devices,
+                    Some(&info_holder),
+                    &GUID_DEVINTERFACE_DISK,
+                    0, // member index — first (and usually only) disk interface
+                    &mut interface_data,
+                )
+            }
+            .is_err()
+            {
+                tracing::debug!(
+                    "device '{}' ({}): no GUID_DEVINTERFACE_DISK interface, skipping",
+                    display_path,
+                    name
+                );
+                continue;
+            }
+
+            let device_wide: Vec<u16> = {
+                let mut required_size = 0u32;
+                // Windows fills required_size with the bytes needed.
+                let _ = unsafe {
+                    SetupDiGetDeviceInterfaceDetailW(
+                        devices,
+                        &interface_data,
+                        None,
+                        0,
+                        Some(&mut required_size),
+                        None,
+                    )
+                };
+                let min_size = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+                if required_size < min_size {
+                    tracing::warn!(
+                        "device '{}' ({}): detail required_size={} < min={}, skipping",
+                        display_path,
+                        name,
+                        required_size,
+                        min_size
+                    );
+                    continue;
+                }
+                let mut buf: Vec<u8> = vec![0u8; required_size as usize];
+                let detail_ptr = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+                unsafe {
+                    (*detail_ptr).cbSize = min_size;
+                }
+                if unsafe {
+                    SetupDiGetDeviceInterfaceDetailW(
+                        devices,
+                        &interface_data,
+                        Some(&mut *detail_ptr),
+                        required_size,
+                        None,
+                        None,
+                    )
+                }
+                .is_err()
+                {
+                    tracing::warn!(
+                        "device '{}' ({}): SetupDiGetDeviceInterfaceDetailW pass 2 failed",
+                        display_path,
+                        name
+                    );
+                    continue;
+                }
+                // The device path lives immediately after cbSize (4 bytes).
+                let path_offset = std::mem::size_of::<u32>();
+                let path_u16: &[u16] = unsafe {
+                    std::slice::from_raw_parts(
+                        buf[path_offset..].as_ptr() as *const u16,
+                        (required_size as usize - path_offset) / 2,
+                    )
+                };
+                let nul = path_u16
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(path_u16.len());
+                path_u16[..=nul].to_vec() // include null terminator for PCWSTR
+            };
+
+            let (size_bytes, sector_size, opened_device) = {
+                let mut info_back: u32 = 0;
+                let mut geometry = DISK_GEOMETRY_EX::default();
+                let out_buffer_size = std::mem::size_of::<DISK_GEOMETRY_EX>() as u32;
+
+                let opened_device = match unsafe {
+                    CreateFileW(
+                        windows::core::PCWSTR(device_wide.as_ptr()),
+                        0,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL,
+                        None,
+                    )
+                } {
+                    Ok(h) => AutoCloseHandle(h),
+                    Err(e) => {
+                        let path_str = String::from_utf16_lossy(
+                            device_wide.split(|&c| c == 0).next().unwrap_or(&[]),
+                        );
+                        tracing::warn!(
+                            "device '{}' ({}): CreateFileW('{}') – {} – skipping",
+                            display_path,
+                            name,
+                            path_str,
+                            e
+                        );
+                        continue;
+                    }
+                };
+                let _ = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                        None,
+                        0,
+                        Some((&mut geometry) as *mut _ as *mut c_void),
+                        out_buffer_size,
+                        Some(&mut info_back),
+                        None,
+                    )
+                };
+                (
+                    geometry.DiskSize as u64,
+                    geometry.Geometry.BytesPerSector as usize,
+                    opened_device,
+                )
+            };
+            // ... (previous ioctl fetching for size_bytes, sector_size)
+
+            let (path, disk_number) = {
+                let mut disk_number: i32 = -1;
+                let mut size: u32 = 0;
+
+                let mut disk_extents = VOLUME_DISK_EXTENTS::default();
+                let res1 = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                        None,
+                        0,
+                        Some(&mut disk_extents as *mut VOLUME_DISK_EXTENTS as *mut _),
+                        std::mem::size_of::<VOLUME_DISK_EXTENTS>() as u32,
+                        Some(&mut size),
+                        None,
+                    )
+                };
+
+                if res1.is_ok() && disk_extents.NumberOfDiskExtents > 0 {
+                    // Ignore RAIDs if there are 2 or more extents
+                    if disk_extents.NumberOfDiskExtents >= 2 {
+                        disk_number = -1;
+                    } else {
+                        // Grab the disk number from the first extent element
+                        disk_number = disk_extents.Extents[0].DiskNumber as i32;
+                    }
+                }
+
+                let mut device_number = STORAGE_DEVICE_NUMBER::default();
+                let res2 = unsafe {
+                    DeviceIoControl(
+                        opened_device.0,
+                        IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                        None,
+                        0,
+                        Some(&mut device_number as *mut STORAGE_DEVICE_NUMBER as *mut _),
+                        std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
+                        Some(&mut size),
+                        None,
+                    )
+                };
+
+                if res2.is_ok() {
+                    disk_number = device_number.DeviceNumber as i32;
+                }
+
+                // If both failed or it's a RAID, you can skip this device loop iteration
+                if disk_number == -1 {
+                    continue;
+                }
+
+                let path_string = format!(r"\\.\PhysicalDrive{}", disk_number);
+
+                (std::path::PathBuf::from(path_string), disk_number)
+            };
+
+            // Calculate the display path (Drive letters)
+            let mountpoints = get_logical_mountpoints(disk_number as u32);
+            let display_path = if mountpoints.is_empty() {
+                // what is better things empty is is more usefull for the user
+                // String::from("Unmounted")
+                String::from("")
+            } else {
+                mountpoints.join(", ") // Formats multiple partitions as "D:\, E:\"
+            };
+
+            output.push(BlockDevice::new(
+                display_path,
+                path,
+                name,
+                size_bytes,
+                is_removable,
+                sector_size,
+            ));
+        }
+        let _ = unsafe { SetupDiDestroyDeviceInfoList(devices) };
+        Ok(output)
+    }
+}
+/// Iterates logical drives (A-Z) and returns the drive letters mapped to the given physical disk.
+fn get_logical_mountpoints(target_disk_number: u32) -> Vec<String> {
+    let mut mountpoints = Vec::new();
+
+    // Get a bitmask of all available logical drives (A=1, B=2, C=4, etc.)
+    let logical_drives_mask = unsafe { GetLogicalDrives() };
+    if logical_drives_mask == 0 {
+        return mountpoints;
+    }
+
+    for i in 0..26 {
+        if (logical_drives_mask & (1 << i)) != 0 {
+            let letter = (b'A' + i) as char;
+            let root_path = format!("{}:\\", letter);
+            let root_wide: Vec<u16> = root_path.encode_utf16().chain(std::iter::once(0)).collect();
+
+            // Only check fixed or removable drives (ignore CD-ROMs, RAM disks, network drives)
+            let drive_type = unsafe { GetDriveTypeW(PCWSTR(root_wide.as_ptr())) };
+            if drive_type != windows::Win32::System::WindowsProgramming::DRIVE_FIXED
+                && drive_type != windows::Win32::System::WindowsProgramming::DRIVE_REMOVABLE
+            {
+                continue;
+            }
+
+            // Open a handle to the logical volume (e.g., "\\.\C:")
+            let device_path = format!(r"\\.\{}:", letter);
+            let device_wide: Vec<u16> = device_path
+                .encode_utf16()
+                .chain(std::iter::once(0))
                 .collect();
 
-            Ok(devices)
-        })
-        .await
-        .map_err(|_| FlashError::SyncError)?
+            let handle = unsafe {
+                CreateFileW(
+                    PCWSTR(device_wide.as_ptr()),
+                    0, // 0 is enough to query metadata; avoids needing Admin write privileges
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+            };
+
+            if let Ok(h) = handle {
+                if !h.is_invalid() {
+                    let auto_handle = AutoCloseHandle(h);
+                    // Use your existing helper to extract the physical disk number
+                    if let Some(disk_num) = storage_device_number(auto_handle.0) {
+                        if disk_num == target_disk_number {
+                            mountpoints.push(root_path);
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    mountpoints
 }

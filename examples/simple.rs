@@ -25,6 +25,7 @@ async fn main() {
         match event {
             flashkit::data_types::DeviceEvent::Added(device) => {
                 info!("Device Attached: {} ({:?})", device.name, device.path);
+                dbg!(device);
             }
             flashkit::data_types::DeviceEvent::Removed(path) => {
                 info!("Device Detached: {:?}", path);
