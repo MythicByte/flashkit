@@ -10,7 +10,6 @@ use crate::{
     },
     traits::AsyncDeviceEnumerator,
 };
-use serde::Deserialize;
 use std::{
     collections::HashSet,
     ffi::c_void,
@@ -46,7 +45,6 @@ use windows::{
             SP_DEVICE_INTERFACE_DATA,
             SP_DEVICE_INTERFACE_DETAIL_DATA_W,
             SP_DEVINFO_DATA,
-            SPDRP_ENUMERATOR_NAME,
             SPDRP_FRIENDLYNAME,
             SPDRP_REMOVAL_POLICY,
             SetupDiDestroyDeviceInfoList,
@@ -96,7 +94,6 @@ use windows::{
     },
     core::PCWSTR,
 };
-use wmi::WMIConnection;
 
 use crate::traits::{
     DeviceEjector,
@@ -165,17 +162,6 @@ impl Drop for VolumeFindHandle {
     fn drop(&mut self) {
         unsafe { FindVolumeClose(self.0).ok() };
     }
-}
-#[derive(Deserialize)]
-#[serde(rename = "Win32_DiskDrive")]
-#[serde(rename_all = "PascalCase")]
-struct Win32DiskDrive {
-    #[serde(rename = "DeviceID")]
-    device_id: String, // "\\.\PhysicalDrive0"
-    model: String, // "Samsung USB Drive"
-    size: Option<u64>,
-    bytes_per_sector: u32,
-    media_type: Option<String>, // "Removable Media" / "Fixed hard disk media"
 }
 
 #[allow(missing_docs)]
@@ -882,7 +868,8 @@ impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
 
     async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        //  Fetch current devices and send them immediately
+
+        // Fetch current devices and send them immediately
         let initial_devices = self.list_devices().await?;
 
         for dev in initial_devices.clone() {
@@ -892,48 +879,19 @@ impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
         }
 
         tokio::spawn(async move {
-            let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel();
-
-            tokio::task::spawn_blocking(move || {
-                let wmi_con = match WMIConnection::new() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!("WMI connection failed: {e}");
-                        return;
-                    }
-                };
-
-                // Query listens for creations, deletions, and modifications of Disk Drives
-                let query = "SELECT * FROM __InstanceOperationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_DiskDrive'";
-
-                let iterator = match wmi_con.exec_notification_query(query) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        tracing::error!("WMI query failed: {e}");
-                        return;
-                    }
-                };
-
-                // Iterate over notifications natively provided by the crate
-                for _event in iterator {
-                    if wake_tx.send(()).is_err() {
-                        break; // The receiver was dropped, shut down the thread
-                    }
-                }
-            });
-
             let mut known_paths: HashSet<PathBuf> =
                 initial_devices.into_iter().map(|d| d.path).collect();
 
-            while wake_rx.recv().await.is_some() {
-                // A slight delay ensures Windows Volume Manager finishes mounting operations
-                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            // Polling loop replacing WMI
+            loop {
+                // Adjust the polling interval to your preference.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
                 // Re-scan active drives
                 let current_devices = match Self::list_devices().await {
                     Ok(d) => d,
                     Err(e) => {
-                        tracing::warn!("Failed to re-enumerate devices during WMI wake: {e}");
+                        tracing::warn!("Failed to re-enumerate devices during polling: {e}");
                         continue;
                     }
                 };
@@ -957,7 +915,7 @@ impl AsyncDeviceEnumerator for WindowsRawWriteHandle {
                 for path in removed_paths {
                     known_paths.remove(&path);
                     if tx.send(DeviceEvent::Removed(path)).await.is_err() {
-                        return;
+                        return; // Receiver was dropped, exit task cleanly
                     }
                 }
             }
