@@ -626,7 +626,6 @@ fn process_single_volume(
     }
     .map_err(|e| FlashError::FilesystemError(format!("Failed to dismount volume: {e}")))?;
 
-    // ✅ FIX: Safe to remove drive letters / mount points ONLY after the volume is locked & dismounted
     remove_mount_points(guid_path);
 
     Ok(Some(lock_guard))
