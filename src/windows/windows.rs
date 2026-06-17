@@ -20,11 +20,11 @@ use std::{
     iter::once,
     mem::size_of,
     os::windows::{
-        fs::FileExt,
-        io::{
-            AsRawHandle,
-            FromRawHandle,
+        fs::{
+            FileExt,
+            OpenOptionsExt,
         },
+        io::AsRawHandle,
     },
     path::{
         Path,
@@ -62,9 +62,9 @@ use windows::{
             CreateFileW,
             DeleteVolumeMountPointW,
             FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAG_NO_BUFFERING,
+            FILE_FLAG_WRITE_THROUGH,
             FILE_FLAGS_AND_ATTRIBUTES,
-            FILE_GENERIC_READ,
-            FILE_GENERIC_WRITE,
             FILE_SHARE_READ,
             FILE_SHARE_WRITE,
             FindFirstVolumeW,
@@ -172,7 +172,7 @@ pub struct WindowsRawWriteHandle {
     /// Keeps the FSCTL_LOCK_VOLUME handles alive for every volume on this
     /// physical drive.  Dropping them releases the locks and lets Windows
     /// remount the filesystems, so they must outlive every write/flush.
-    _volume_locks: Vec<AutoCloseHandle>,
+    _volume_locks: Vec<std::fs::File>,
 }
 
 impl RawWriteHandle for WindowsRawWriteHandle {
@@ -229,73 +229,37 @@ impl RawWriteHandle for WindowsRawWriteHandle {
 impl DeviceWriter for WindowsRawWriteHandle {
     type Handle = WindowsRawWriteHandle;
 
-    /// Acquire and hold volume locks BEFORE opening the write handle.
-    /// unmount_volumes_on_drive_locked returns the lock handles; as long as
-    /// they stay alive inside WindowsRawWriteHandle, Windows cannot remount
-    /// the filesystem and interrupt our writes mid-flash
+    // Inside `impl DeviceWriter for WindowsRawWriteHandle`
     async fn open_for_writing(&self, device: &BlockDevice) -> FlashResult<Self::Handle> {
         let path = device.path.clone();
         let sector_size = device.sector_size;
         let size_bytes = device.size_bytes;
         let path_str = path.to_string_lossy().to_string();
-        let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
-        //  Lock and dismount all volumes on this physical drive first
+        // Lock and dismount all volumes
         let volume_locks = unmount_volumes_on_drive_locked(&path)?;
 
-        //  Open the physical drive for raw master writing
-        let handle = 'attempt: {
+        let file = 'attempt: {
             let mut last_error = FlashError::WindowsHandle;
 
             for _ in 0..10 {
-                unsafe {
-                    let handle_result = CreateFileW(
-                        PCWSTR(wide.as_ptr()),
-                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                        None,
-                        OPEN_EXISTING,
-                        FILE_FLAGS_AND_ATTRIBUTES(0),
-                        None,
-                    );
+                let file_result = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+                    // disable kernel cache
+                    .custom_flags(FILE_FLAG_NO_BUFFERING.0 | FILE_FLAG_WRITE_THROUGH.0)
+                    .open(&path_str);
 
-                    match handle_result {
-                        Ok(h) if !h.is_invalid() => {
-                            break 'attempt Ok(AutoCloseHandle(h));
-                        }
-                        Err(e) => {
-                            last_error = FlashError::WindowsError(e);
-                        }
-                        _ => {
-                            last_error = FlashError::WindowsHandle;
-                        }
-                    }
+                match file_result {
+                    Ok(f) => break 'attempt Ok(f),
+                    Err(e) => last_error = FlashError::Io(e),
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(last_error)
         }?;
 
-        // //  Force Windows to refresh the partition table layout
-        // unsafe {
-        //     DeviceIoControl(
-        //         handle.0,
-        //         IOCTL_DISK_UPDATE_PROPERTIES,
-        //         None,
-        //         0,
-        //         None,
-        //         0,
-        //         None,
-        //         None,
-        //     )
-        //     .map_err(FlashError::WindowsError)?;
-        // }
-
-        // This keeps the underlying OS handle open so std::fs::File can own it safely!
-        let raw_handle_ptr = handle.0.0;
-        std::mem::forget(handle);
-
-        let file = unsafe { std::fs::File::from_raw_handle(raw_handle_ptr) };
         Ok(WindowsRawWriteHandle {
             file: Some(file),
             sector_size,
@@ -351,7 +315,7 @@ impl DeviceUnmounter for WindowsRawWriteHandle {
 /// The caller must keep the returned `Vec<AutoCloseHandle>` alive for the
 /// entire flash operation.  Dropping them releases `FSCTL_LOCK_VOLUME` and
 /// lets Windows remount the filesystems, corrupting mid-flash writes.
-fn unmount_volumes_on_drive_locked(physical_path: &Path) -> FlashResult<Vec<AutoCloseHandle>> {
+fn unmount_volumes_on_drive_locked(physical_path: &Path) -> FlashResult<Vec<std::fs::File>> {
     const VOLUME_GUID_BUF_LEN: usize = 64;
     let mut vol_buf = vec![0u16; VOLUME_GUID_BUF_LEN];
 
@@ -359,7 +323,7 @@ fn unmount_volumes_on_drive_locked(physical_path: &Path) -> FlashResult<Vec<Auto
 
     // The guard calls `FindVolumeClose` when it drops.
     let finder = VolumeFindHandle::start(&mut vol_buf)?;
-    let mut locks: Vec<AutoCloseHandle> = Vec::new();
+    let mut locks: Vec<std::fs::File> = Vec::new();
 
     loop {
         let guid_path = decode_wide_nul_string(&vol_buf);
@@ -545,53 +509,43 @@ fn decode_wide_nul_string(buf: &[u16]) -> String {
 fn process_single_volume(
     guid_path: &str,
     target_number: u32,
-) -> FlashResult<Option<AutoCloseHandle>> {
+) -> FlashResult<Option<std::fs::File>> {
     let device_path = guid_path.trim_end_matches('\\');
-    let device_wide: Vec<u16> = device_path.encode_utf16().chain(once(0)).collect();
 
-    // Query handle (0 access is enough to get storage device number safely)
-    let query_handle = unsafe {
-        CreateFileW(
-            PCWSTR(device_wide.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,
-        )
-    }
-    .map_err(|e| FlashError::FilesystemError(format!("Failed to query volume attributes: {e}")))?;
+    //  Query Handle
+    let query_file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .open(device_path)
+        .map_err(|e| {
+            FlashError::FilesystemError(format!("Failed to query volume attributes: {e}"))
+        })?;
 
-    let query_guard = AutoCloseHandle(query_handle);
-    let is_match = storage_device_number(query_handle) == Some(target_number);
-    drop(query_guard);
+    // Safely cast to HANDLE for DeviceIoControl
+    let raw_query_handle = HANDLE(query_file.as_raw_handle() as _);
+    let is_match = storage_device_number(raw_query_handle) == Some(target_number);
+
+    drop(query_file); // Automatically closes the handle
 
     if !is_match {
         return Ok(None);
     }
 
-    // triggers OS Sharing Violations if any files are currently open.
-    let write_handle = unsafe {
-        CreateFileW(
-            PCWSTR(device_wide.as_ptr()),
-            FILE_GENERIC_READ.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,
-        )
-    }
-    .map_err(|e| FlashError::FilesystemError(format!("Access denied opening volume: {e}")))?;
+    //  Write Handle
+    let write_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .open(device_path)
+        .map_err(|e| FlashError::FilesystemError(format!("Access denied opening volume: {e}")))?;
 
-    let lock_guard = AutoCloseHandle(write_handle);
+    let raw_write_handle = HANDLE(write_file.as_raw_handle() as _);
 
     let mut locked = false;
     for _ in 0..10 {
         if unsafe {
             DeviceIoControl(
-                write_handle,
+                raw_write_handle,
                 FSCTL_LOCK_VOLUME,
                 None,
                 0,
@@ -605,20 +559,16 @@ fn process_single_volume(
             locked = true;
             break;
         }
-        // Wait for system/AV to drop locks
         thread::sleep(Duration::from_millis(250));
     }
 
     if !locked {
-        return Err(FlashError::FilesystemError(
-            "Failed to lock volume (files may be in use by Anti-Virus)".into(),
-        ));
+        return Err(FlashError::FilesystemError("Failed to lock volume".into()));
     }
 
-    // Dismount the filesystem
     unsafe {
         DeviceIoControl(
-            write_handle,
+            raw_write_handle,
             FSCTL_DISMOUNT_VOLUME,
             None,
             0,
@@ -632,7 +582,8 @@ fn process_single_volume(
 
     remove_mount_points(guid_path);
 
-    Ok(Some(lock_guard))
+    // Return the std::fs::File so it stays alive and keeps the lock
+    Ok(Some(write_file))
 }
 /// Query the system for all mount points (drive letters or paths)
 /// associated with a specific physical drive number.
