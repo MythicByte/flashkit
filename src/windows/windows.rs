@@ -123,8 +123,8 @@ unsafe impl Sync for AutoCloseHandle {}
 
 /// Owns a `FindFirstVolumeW` enumeration cursor and closes it on drop.
 ///
-/// The raw HANDLE is kept private; all access goes through the typed methods
-/// below.  This prevents the Copy-able raw value from "escaping" and being
+/// The raw HANDLE is kept private, all access goes through the typed methods
+/// below.  This prevents the Copy-able raw value from *escaping* and being
 /// used independently of its owner.
 #[derive(Debug)]
 struct VolumeFindHandle(HANDLE);
@@ -133,7 +133,7 @@ impl VolumeFindHandle {
     /// Begin volume enumeration.  Writes the first volume's GUID path into
     /// `buf` and returns the guard that owns the cursor.
     ///
-    /// A volume GUID path looks like `\\?\Volume{xxxxxxxx-...}\` — a stable,
+    /// A volume GUID path looks like `\\?\Volume{xxxxxxxx-...}\` ,
     /// letter-independent name for a volume that does not change even if the
     /// drive letter is reassigned.
     fn start(buf: &mut [u16]) -> FlashResult<Self> {
@@ -339,6 +339,8 @@ impl DeviceUnmounter for WindowsRawWriteHandle {
     /// removed because of complex configureguration moved into [open_for_writing]
     ///
     /// **does nothing**
+    ///
+    /// fixes a problem with the traits and no need to rewrite flasher. Would need to be rewritten
     async fn unmount(&self, _device: &BlockDevice) -> FlashResult<()> {
         Ok(())
     }
@@ -464,20 +466,20 @@ fn storage_device_number(handle: HANDLE) -> Option<u32> {
     }
 }
 
-// `GetVolumePathNamesForVolumeNameW` returns all of a volume's mount points
-// as a "multi-string": consecutive null-terminated UTF-16 strings packed into
-// one buffer, ending with an extra null:
-//
-//   C:\<NUL>D:\Data\<NUL><NUL>
-//
-// The safe approach is the two-pass pattern:
-//   Pass 1 — call with a 1-element probe buffer.  The call fails but Windows
-//             sets `required_chars` to the number of UTF-16 code units needed.
-//   Pass 2 — allocate exactly that many code units and call again.
-//
-// A fixed-size buffer (as the original used) silently fails when a drive has
-// many or long mount points, leaving them attached and causing the later
-// FSCTL_DISMOUNT_VOLUME to produce incomplete results.
+/// `GetVolumePathNamesForVolumeNameW` returns all of a volume's mount points
+/// as a "multi-string": consecutive null-terminated UTF-16 strings packed into
+/// one buffer, ending with an extra null:
+///
+///   C:\<NUL>D:\Data\<NUL><NUL>
+///
+/// The safe approach is the two-pass pattern:
+///   Pass 1 — call with a 1-element probe buffer.  The call fails but Windows
+///             sets `required_chars` to the number of UTF-16 code units needed.
+///   Pass 2 — allocate exactly that many code units and call again.
+///
+/// A fixed-size buffer (as the original used) silently fails when a drive has
+/// many or long mount points, leaving them attached and causing the later
+/// FSCTL_DISMOUNT_VOLUME to produce incomplete results.
 
 fn remove_mount_points(guid_path: &str) {
     let guid_wide: Vec<u16> = guid_path.encode_utf16().chain(once(0)).collect();
@@ -493,7 +495,8 @@ fn remove_mount_points(guid_path: &str) {
     };
 
     if required_chars == 0 {
-        return; // no mount points, or volume not accessible
+        // no mount points, or volume not accessible
+        return;
     }
 
     let mut buf = vec![0u16; required_chars as usize];
@@ -602,7 +605,8 @@ fn process_single_volume(
             locked = true;
             break;
         }
-        thread::sleep(Duration::from_millis(250)); // Wait for system/AV to drop locks
+        // Wait for system/AV to drop locks
+        thread::sleep(Duration::from_millis(250));
     }
 
     if !locked {
@@ -636,7 +640,7 @@ fn process_single_volume(
 pub fn get_drive_letters_for_drive(device: BlockDevice) -> Vec<String> {
     let mut letters = Vec::new();
 
-    // 1. Safely extract the drive number (e.g., 2 from "\\.\PhysicalDrive2")
+    //  Safely extract the drive number  from "\\.\PhysicalDrive2"
     let target_number = match physical_drive_number(&device.path) {
         Ok(num) => num,
         Err(_) => return letters, // Return empty if path can't be parsed
@@ -727,7 +731,8 @@ fn get_single_volume_letters(guid_path: &str, target_number: u32) -> Option<Vec<
     loop {
         let term = buf[offset..].iter().position(|&c| c == 0).unwrap_or(0);
         if term == 0 {
-            break; // Double-null terminator reached
+            // Double-null terminator reached
+            break;
         }
 
         let mount_point = &buf[offset..offset + term];
@@ -908,7 +913,7 @@ impl WindowsRawWriteHandle {
 
             let device_wide: Vec<u16> = {
                 let mut required_size = 0u32;
-                // Windows fills required_size with the bytes needed.
+                // Windows fills required_size with the bytes needed
                 let _ = unsafe {
                     SetupDiGetDeviceInterfaceDetailW(
                         devices,
@@ -954,7 +959,7 @@ impl WindowsRawWriteHandle {
                     );
                     continue;
                 }
-                // The device path lives immediately after cbSize (4 bytes).
+                // The device path lives immediately after cbSize (4 bytes)
                 let path_offset = std::mem::size_of::<u32>();
                 let path_u16: &[u16] = unsafe {
                     std::slice::from_raw_parts(
@@ -1018,7 +1023,6 @@ impl WindowsRawWriteHandle {
                     opened_device,
                 )
             };
-            // ... (previous ioctl fetching for size_bytes, sector_size)
 
             let (path, disk_number) = {
                 let mut disk_number: i32 = -1;
@@ -1103,7 +1107,7 @@ impl WindowsRawWriteHandle {
 fn get_logical_mountpoints(target_disk_number: u32) -> Vec<String> {
     let mut mountpoints = Vec::new();
 
-    // Get a bitmask of all available logical drives (A=1, B=2, C=4, etc.)
+    // Get a bitmask of all available logical drives (A=1, B=2, C=4)
     let logical_drives_mask = unsafe { GetLogicalDrives() };
     if logical_drives_mask == 0 {
         return mountpoints;

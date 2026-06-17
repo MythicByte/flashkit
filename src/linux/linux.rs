@@ -1,3 +1,4 @@
+//! The Linux flasher Interface. Uses the Udisk2 over dbus to flash the device
 use std::{
     collections::{
         HashMap,
@@ -482,7 +483,7 @@ impl DeviceWriter for LinuxDBus {
             .to_string_lossy();
         let dev_obj_path = format!("/org/freedesktop/UDisks2/block_devices/{}", dev_filename);
 
-        // 2. Create UDisks2BlockProxy for it
+        //  Create UDisks2BlockProxy
         let block_proxy = UDisks2BlockProxy::builder(&self.connection)
             .path(dev_obj_path.as_str())?
             .build()
@@ -494,7 +495,7 @@ impl DeviceWriter for LinuxDBus {
         let mut options = HashMap::new();
         let flags_owned = Value::from(open_flags).try_into_owned()?;
 
-        options.insert("flags".to_string(), flags_owned); // 3. Open device via D-Bus
+        options.insert("flags".to_string(), flags_owned);
         let fd: OwnedFd = block_proxy
             .open_device("rw", &options)
             .await

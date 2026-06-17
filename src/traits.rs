@@ -26,7 +26,7 @@ where
         send_progress: tokio::sync::watch::Sender<FlashProgress>,
     ) -> FlashResult<tokio::sync::watch::Sender<FlashProgress>>;
 
-    /// flashes
+    /// flasher
     async fn flash(
         &self,
         source_of_image: AsyncImageSourceFile,
@@ -36,17 +36,17 @@ where
 }
 /// A raw write handle to a block device.
 /// Separated from DeviceWriter so the handle can carry platform state
-/// (e.g. Windows keeps the lock handle alive here).
+/// (Windows keeps the lock handle alive here).
 pub trait RawWriteHandle {
     /// write to fill with offset
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> FlashResult<()>;
     /// read to fill with offset
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> FlashResult<usize>;
 
-    /// Flush kernel buffers → physical media. Must be called before Done.
+    /// Flush kernel buffers → physical media. Must be called before Done!
     fn flush_to_disk(&mut self) -> FlashResult<()>;
 
-    /// Sector size for this device. Writes must be multiples on Windows.
+    /// Sector size for this device.
     fn sector_size(&self) -> usize;
 
     /// Total writable size in bytes.
@@ -67,9 +67,9 @@ pub trait DeviceWriter {
 
 /// Enumerate block devices on the system.
 /// Each platform reads from a different source:
-///   Linux   → /sys/block + udev
+///   Linux   → dbus udisk2
 ///   macOS   → IOKit IOMedia registry  
-///   Windows → SetupDi / WMI
+///   Windows → win32
 pub trait DeviceEnumerator {
     /// list all storage devices
     async fn list_devices(&self) -> FlashResult<Vec<BlockDevice>>;
@@ -82,11 +82,11 @@ pub trait AsyncDeviceEnumerator: DeviceEnumerator {
     ///
     /// Watch for hotplug events (USB insert/remove).
     /// Gives at startup the devices back and then watching
-    /// Returns a channel receiver; caller drops it to stop watching.
+    /// Returns a channel receiver, caller drops it to stop watching.
     async fn watch_devices(&self) -> FlashResult<Self::WatchStream>;
 }
 /// Unmount all filesystems on a device before writing.
-///   Linux   → umount2() syscall via nix
+///   Linux   → via dbus and udisk2
 ///   macOS   → DADiskUnmount() via DiskArbitration
 ///   Windows → FSCTL_LOCK_VOLUME + FSCTL_DISMOUNT_VOLUME
 pub trait DeviceUnmounter {
