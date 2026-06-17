@@ -62,6 +62,8 @@ use windows::{
             CreateFileW,
             DeleteVolumeMountPointW,
             FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAG_NO_BUFFERING,
+            FILE_FLAG_WRITE_THROUGH,
             FILE_FLAGS_AND_ATTRIBUTES,
             FILE_SHARE_READ,
             FILE_SHARE_WRITE,
@@ -245,6 +247,8 @@ impl DeviceWriter for WindowsRawWriteHandle {
                     .read(true)
                     .write(true)
                     .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+                    // disable kernel cache
+                    .custom_flags(FILE_FLAG_NO_BUFFERING.0 | FILE_FLAG_WRITE_THROUGH.0)
                     .open(&path_str);
 
                 match file_result {
