@@ -4,11 +4,10 @@ version = "0.2.2"
 edition = "2024"
 
 [dependencies]
-hex = "0.4.3"
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.11.0"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync","process"] }
+tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "rt-multi-thread","process"] }
 tokio-stream = "0.1.18"
 tracing = "0.1.44"
 
@@ -17,11 +16,12 @@ libc = "0.2.186"
 rustix = { version = "1.1.4", features = ["param","fs","net"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.15.0", features = ["tokio"] }
-zvariant = "5.11.0"
+zbus = { version = "5.15.0", default-features = false, features = ["tokio"] }
+zvariant = { version = "5.11.0", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1.9.0"
+
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [

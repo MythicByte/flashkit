@@ -49,9 +49,6 @@ pub enum FlashError {
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
-    FromHexError(#[from] hex::FromHexError),
-
-    #[error(transparent)]
     ParseInt(#[from] std::num::ParseIntError),
 
     #[error(transparent)]
