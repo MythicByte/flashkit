@@ -2,6 +2,9 @@
 name = "flashkit"
 version = "0.2.2"
 edition = "2024"
+description = "A libary for flashing devices with images"
+authors = ["Markus Götz <mgmarkusgoetz@gmail.com>"]
+keywords = ["flashing","iso"]
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
