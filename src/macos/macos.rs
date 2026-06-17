@@ -105,8 +105,7 @@ impl DeviceWriter for DarwinInterface {
             // O_SYNC  — every write is flushed to the device before returning.
             //
             // macOS has no O_DIRECT.  Kernel buffer-cache bypass is applied via
-            // fcntl(F_NOCACHE) after we receive the fd (see below); it cannot
-            // be expressed as an open(2) flag.
+            // fcntl(F_NOCACHE) after we receive the fd, it cannot.
             //
             // O_CLOEXEC is NOT forwarded to authopen — authopen opens the device
             // on our behalf and the flags control *its* open() call.  We set
@@ -151,11 +150,11 @@ impl DeviceWriter for DarwinInterface {
                 )));
             }
 
-            // 1. FD_CLOEXEC: prevent the device fd leaking into child processes.
+            //  FD_CLOEXEC: prevent the device fd leaking into child processes.
             fcntl_setfd(&owned_fd, FdFlags::CLOEXEC)
                 .map_err(|e| FlashError::Io(std::io::Error::from(e)))?;
 
-            // 2. F_NOCACHE: bypass the kernel unified buffer cache for this fd.
+            //  F_NOCACHE: bypass the kernel unified buffer cache for this fd.
             //    This is the macOS equivalent of Linux's O_DIRECT.  It must be
             //    set post-open via fcntl — there is no open(2) flag equivalent.
             fcntl_nocache(&owned_fd, true).map_err(|e| FlashError::Io(std::io::Error::from(e)))?;
@@ -369,7 +368,7 @@ impl AsyncDeviceEnumerator for DarwinInterface {
     async fn watch_devices(&self) -> FlashResult<Self::WatchStream> {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
 
-        // 1. Establish the identical uniform baseline snapshot instantly
+        //  Establish the identical uniform baseline snapshot instantly
         let initial_devices = self.list_devices().await?;
         let mut known_paths: HashSet<PathBuf> = HashSet::new();
 
@@ -382,7 +381,6 @@ impl AsyncDeviceEnumerator for DarwinInterface {
 
         let enumerator = self.clone();
 
-        // 2. Spawn the asynchronous polling diff engine
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
             // Missed ticks are skipped because we explicitly poll on a fixed clock
