@@ -72,7 +72,7 @@ impl PageAlignedBuffer {
 }
 /// get buffer and size
 pub fn page_aligned_buffer(pages: usize) -> (PageAlignedBuffer, *mut u8, usize) {
-    let buffer = PageAlignedBuffer::new(pages).expect("Failed");
+    let buffer = PageAlignedBuffer::new(pages).expect("Algined memory failed");
     let ptr = buffer.as_ptr();
     let size = buffer.size();
 
