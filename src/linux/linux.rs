@@ -291,7 +291,7 @@ fn is_block_device_path(path: &str) -> bool {
     let Some(suffix) = path.strip_prefix("/org/freedesktop/UDisks2/block_devices/") else {
         return false;
     };
-    // Reject partitions (sdb1, nvme0n1p2, …) — same rule as list_devices.
+    // Reject partitions (sdb1, nvme0n1p2) — same rule as list_devices.
     !suffix.is_empty() && !suffix.chars().last().unwrap_or(' ').is_ascii_digit()
 }
 impl DeviceEnumerator for LinuxDBus {
@@ -499,7 +499,7 @@ impl DeviceWriter for LinuxDBus {
         let fd: OwnedFd = block_proxy
             .open_device("rw", &options)
             .await
-            .map_err(FlashError::Zbus)?;
+            .map_err(|_| FlashError::InsufficientPrivileges)?;
         let std_fd: std::os::fd::OwnedFd = fd.into();
         let file = std::fs::File::from(std_fd);
 
