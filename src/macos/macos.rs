@@ -206,44 +206,35 @@ impl DeviceEjector for DarwinInterface {
         &self,
         device: &crate::data_types::BlockDevice,
     ) -> crate::error::FlashResult<()> {
-        // `diskutil unmountDisk force` kicks off all volumes even if busy,
-        // and suppresses diskarbitrationd auto-remount long enough to eject.
-        // Without `force`, a regular unmountDisk can silently fail if anything
-        // holds the disk open, and diskarbitrationd re-mounts the newly-written
-        // filesystem in the ~50µs gap between unmount and eject.
-        let force_unmount = || async {
-            let _ = tokio::process::Command::new("/usr/sbin/diskutil")
-                .args([
-                    "unmountDisk",
-                    "force",
-                    device.path.to_string_lossy().as_ref(),
-                ])
-                .output()
-                .await;
-        };
+        let info = tokio::process::Command::new("/usr/sbin/diskutil")
+            .args(["info", "-plist", device.path.to_string_lossy().as_ref()])
+            .output()
+            .await
+            .map_err(FlashError::Io)?;
 
-        force_unmount().await;
+        // Non-zero exit or unparseable plist → device is gone already. Done.
+        let is_mounted = plist::from_bytes::<plist::Value>(&info.stdout)
+            .ok()
+            .and_then(|v| v.into_dictionary())
+            .and_then(|d| {
+                d.get("MountPoint")
+                    .and_then(|v| v.as_string())
+                    .map(|s| !s.is_empty())
+            })
+            .unwrap_or(false);
 
-        // Give diskarbitrationd a moment to settle after the force-unmount
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        if !is_mounted {
+            return Ok(());
+        }
 
-        // Retry up to 10 times, diskarbitrationd can still sneak a remount in.
-        // Each failed attempt force-unmounts again before the next try.
-        for attempt in 1..=10 {
-            let out = tokio::process::Command::new("/usr/sbin/diskutil")
-                .args(["eject", device.path.to_string_lossy().as_ref()])
-                .output()
-                .await
-                .map_err(FlashError::Io)?;
+        let out = tokio::process::Command::new("/usr/sbin/diskutil")
+            .args(["eject", device.path.to_string_lossy().as_ref()])
+            .output()
+            .await
+            .map_err(FlashError::Io)?;
 
-            if out.status.success() {
-                return Ok(());
-            }
-
-            if attempt < 10 {
-                force_unmount().await;
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            }
+        if out.status.success() {
+            return Ok(());
         }
 
         Err(FlashError::DeviceBusy {
