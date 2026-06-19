@@ -69,8 +69,8 @@ impl RawWriteHandle for DarwinRawWriteHandle {
         Ok(bytes_read)
     }
 
+    /// do not needed no cache do all the things
     fn flush_to_disk(&mut self) -> FlashResult<()> {
-        // self.file.sync_all()?;
         Ok(())
     }
 
@@ -206,13 +206,19 @@ impl DeviceEjector for DarwinInterface {
         &self,
         device: &crate::data_types::BlockDevice,
     ) -> crate::error::FlashResult<()> {
-        let out = tokio::process::Command::new("diskutil")
+        let _ = tokio::process::Command::new("/usr/sbin/diskutil")
+            .args(["unmountDisk", device.path.to_string_lossy().as_ref()])
+            .output()
+            .await;
+
+        let out = tokio::process::Command::new("/usr/sbin/diskutil")
             .args(["eject", device.path.to_string_lossy().as_ref()])
             .output()
             .await
             .map_err(FlashError::Io)?;
 
         if !out.status.success() {
+            let reason = String::from_utf8_lossy(&out.stderr).to_string();
             return Err(FlashError::DeviceBusy {
                 path: device.path.clone(),
             });
