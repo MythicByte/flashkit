@@ -206,25 +206,49 @@ impl DeviceEjector for DarwinInterface {
         &self,
         device: &crate::data_types::BlockDevice,
     ) -> crate::error::FlashResult<()> {
-        let _ = tokio::process::Command::new("/usr/sbin/diskutil")
-            .args(["unmountDisk", device.path.to_string_lossy().as_ref()])
-            .output()
-            .await;
+        // `diskutil unmountDisk force` kicks off all volumes even if busy,
+        // and suppresses diskarbitrationd auto-remount long enough to eject.
+        // Without `force`, a regular unmountDisk can silently fail if anything
+        // holds the disk open, and diskarbitrationd re-mounts the newly-written
+        // filesystem in the ~50µs gap between unmount and eject.
+        let force_unmount = || async {
+            let _ = tokio::process::Command::new("/usr/sbin/diskutil")
+                .args([
+                    "unmountDisk",
+                    "force",
+                    device.path.to_string_lossy().as_ref(),
+                ])
+                .output()
+                .await;
+        };
 
-        let out = tokio::process::Command::new("/usr/sbin/diskutil")
-            .args(["eject", device.path.to_string_lossy().as_ref()])
-            .output()
-            .await
-            .map_err(FlashError::Io)?;
+        force_unmount().await;
 
-        if !out.status.success() {
-            let reason = String::from_utf8_lossy(&out.stderr).to_string();
-            return Err(FlashError::DeviceBusy {
-                path: device.path.clone(),
-            });
+        // Give diskarbitrationd a moment to settle after the force-unmount
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Retry up to 10 times, diskarbitrationd can still sneak a remount in.
+        // Each failed attempt force-unmounts again before the next try.
+        for attempt in 1..=10 {
+            let out = tokio::process::Command::new("/usr/sbin/diskutil")
+                .args(["eject", device.path.to_string_lossy().as_ref()])
+                .output()
+                .await
+                .map_err(FlashError::Io)?;
+
+            if out.status.success() {
+                return Ok(());
+            }
+
+            if attempt < 10 {
+                force_unmount().await;
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
         }
 
-        Ok(())
+        Err(FlashError::DeviceBusy {
+            path: device.path.clone(),
+        })
     }
 }
 impl DeviceUnmounter for DarwinInterface {
