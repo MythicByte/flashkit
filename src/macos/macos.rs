@@ -15,10 +15,7 @@ use std::{
 
 use rustix::{
     cmsg_space,
-    fs::{
-        OFlags,
-        fcntl_nocache,
-    },
+    fs::OFlags,
     io::{
         FdFlags,
         fcntl_setfd,
@@ -191,7 +188,9 @@ impl DeviceEnumerator for DarwinInterface {
             for disk_val in whole_disks {
                 if let Some(disk_str) = disk_val.as_string() {
                     // Ignore disk images/synthetics, query real attributes for individual whole disks
-                    if let Ok(device) = fetch_disk_info(disk_str).await {
+                    if let Ok(device) = fetch_disk_info(disk_str).await
+                        && device.is_removable
+                    {
                         devices.push(device);
                     }
                 }
