@@ -253,7 +253,7 @@ impl DeviceWriter for WindowsRawWriteHandle {
 
                 match file_result {
                     Ok(f) => break 'attempt Ok(f),
-                    Err(e) => last_error = FlashError::Io(e),
+                    Err(_e) => last_error = FlashError::InsufficientPrivileges,
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

@@ -266,3 +266,11 @@ pub fn calculate_size_from_bytes(bytes_size: u64) -> Size {
         Size::Bytes(bytes)
     }
 }
+impl Display for HashFailedWhen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HashFailedWhen::FirstCheck => write!(f, "First Hash failed"),
+            HashFailedWhen::VerificationCheck => write!(f, "Second Hash failed"),
+        }
+    }
+}
