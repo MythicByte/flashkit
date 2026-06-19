@@ -122,14 +122,9 @@ impl DeviceWriter for DarwinInterface {
                 FlashError::FilesystemError(format!("failed to create socketpair: {e}"))
             })?;
 
-            // Spawn authopen and capture stdout so we can call recvmsg(2) on it.
+            // Spawn authopen and capture stdout
             let mut child = std::process::Command::new("authopen")
-                .args([
-                    "-stdoutpipe", // deliver the fd via SCM_RIGHTS on stdout
-                    "-o",
-                    &open_flags.to_string(),
-                    &raw_path,
-                ])
+                .args(["-stdoutpipe", "-o", &open_flags.to_string(), &raw_path])
                 .stdout(std::process::Stdio::from(child_sock))
                 .spawn()
                 .map_err(|e| {
@@ -137,7 +132,6 @@ impl DeviceWriter for DarwinInterface {
                 })?;
 
             // recvmsg blocks until authopen either sends the fd or closes the pipe.
-            // OwnedFd returned here closes automatically on any subsequent error.
             let owned_fd: OwnedFd = recv_fd_from_authopen(parent_sock.as_fd())?;
 
             // Reap the child to avoid zombies.  If authopen signals failure even
@@ -198,7 +192,7 @@ impl DeviceEnumerator for DarwinInterface {
         {
             for disk_val in whole_disks {
                 if let Some(disk_str) = disk_val.as_string() {
-                    // Ignore disk images/synthetics; query real attributes for individual whole disks
+                    // Ignore disk images/synthetics, query real attributes for individual whole disks
                     if let Ok(device) = fetch_disk_info(disk_str).await {
                         devices.push(device);
                     }
@@ -254,17 +248,15 @@ impl DeviceUnmounter for DarwinInterface {
 /// Convert a buffered device path to its raw counterpart.
 ///
 /// `/dev/disk2`  →  `/dev/rdisk2`
-/// `/dev/rdisk2` →  `/dev/rdisk2`  (already raw; no-op)
+/// `/dev/rdisk2` →  `/dev/rdisk2`  
 ///
 /// Anything that does not match the expected `/dev/diskN` pattern is returned
-/// unchanged so callers can still attempt the open and surface the OS error.
+/// unchanged so callers can still attempt the open and surface the OS error
 fn to_raw_device_path(path: &std::path::Path) -> PathBuf {
     match path.file_name().and_then(|n| n.to_str()) {
-        // Already a raw node.
         Some(name) if name.starts_with("rdisk") => path.to_path_buf(),
-        // Buffered node – prepend 'r'.
         Some(name) if name.starts_with("disk") => PathBuf::from(format!("/dev/r{}", name)),
-        // Unknown format – pass through and let the OS complain.
+        // Unknown format – pass through and let the OS complain
         _ => path.to_path_buf(),
     }
 }
@@ -321,18 +313,12 @@ async fn fetch_disk_info(disk_identifier: &str) -> FlashResult<crate::data_types
 /// Receive the file descriptor that `authopen -stdoutpipe` sends via SCM_RIGHTS.
 ///
 /// authopen delivers the opened device fd as a single `SCM_RIGHTS` ancillary
-/// control message with one null byte as the regular data payload.  A plain
-/// `read()` will never surface the fd — `recvmsg(2)` is required.
-///
-/// The returned [`OwnedFd`] closes automatically on drop, so every early-return
-/// error path is leak-free with no manual `close` calls.
+/// control message with one null byte as the regular data payload.
 fn recv_fd_from_authopen(pipe: BorrowedFd<'_>) -> FlashResult<OwnedFd> {
-    // Allocate a control-message buffer sized for exactly one SCM_RIGHTS fd.
-    // cmsg_space! accounts for the cmsghdr header + alignment padding.
     let mut cmsg_buf = vec![MaybeUninit::<u8>::uninit(); cmsg_space!(ScmRights(1))];
     let mut ancillary = RecvAncillaryBuffer::new(&mut cmsg_buf);
 
-    // authopen writes one null byte as the regular data portion of the message.
+    // authopen writes one null byte as the regular data portion of the message
     let mut data_byte = [0u8; 1];
     let mut iov = [std::io::IoSliceMut::new(&mut data_byte)];
 
@@ -347,9 +333,6 @@ fn recv_fd_from_authopen(pipe: BorrowedFd<'_>) -> FlashResult<OwnedFd> {
         ));
     }
 
-    // Walk the control message chain and extract the first SCM_RIGHTS fd.
-    // Any extra unexpected fds yielded by the iterator are dropped (and thus
-    // closed) here automatically via OwnedFd's Drop impl.
     for msg in ancillary.drain() {
         if let RecvAncillaryMessage::ScmRights(mut fds) = msg {
             if let Some(fd) = fds.next() {
@@ -405,7 +388,7 @@ impl AsyncDeviceEnumerator for DarwinInterface {
                 for dev in current_devices {
                     if known_paths.insert(dev.path.clone()) {
                         if tx.send(DeviceEvent::Added(dev)).await.is_err() {
-                            return; // Consumer dropped the stream receiver, exit task safely
+                            return;
                         }
                     }
                 }
