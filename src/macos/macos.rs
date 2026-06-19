@@ -110,7 +110,7 @@ impl DeviceWriter for DarwinInterface {
             // O_CLOEXEC is NOT forwarded to authopen — authopen opens the device
             // on our behalf and the flags control *its* open() call.  We set
             // FD_CLOEXEC on the received fd ourselves with fcntl_setfd below.
-            let open_flags = (OFlags::RDWR | OFlags::SYNC).bits();
+            let open_flags = OFlags::RDWR.bits();
 
             let (parent_sock, child_sock) = rustix::net::socketpair(
                 rustix::net::AddressFamily::UNIX,
@@ -122,8 +122,11 @@ impl DeviceWriter for DarwinInterface {
                 FlashError::FilesystemError(format!("failed to create socketpair: {e}"))
             })?;
 
-            // Spawn authopen and capture stdout
-            let mut child = std::process::Command::new("authopen")
+            // authopen lives at /usr/libexec/authopen on every macOS release.
+            // Relying on PATH is unreliable in sandboxed / GUI-launched processes
+            // and produces ENOENT (os error 2) when PATH doesn't include
+            // /usr/libexec.
+            let mut child = std::process::Command::new("/usr/libexec/authopen")
                 .args(["-stdoutpipe", "-o", &open_flags.to_string(), &raw_path])
                 .stdout(std::process::Stdio::from(child_sock))
                 .spawn()
