@@ -99,14 +99,6 @@ impl DeviceWriter for DarwinInterface {
         let size_bytes = device.size_bytes;
         let file = tokio::task::spawn_blocking(move || -> FlashResult<std::fs::File> {
             // O_RDWR  — read/write access.
-            // O_SYNC  — every write is flushed to the device before returning.
-            //
-            // macOS has no O_DIRECT.  Kernel buffer-cache bypass is applied via
-            // fcntl(F_NOCACHE) after we receive the fd, it cannot.
-            //
-            // O_CLOEXEC is NOT forwarded to authopen — authopen opens the device
-            // on our behalf and the flags control *its* open() call.  We set
-            // FD_CLOEXEC on the received fd ourselves with fcntl_setfd below.
             let open_flags = OFlags::RDWR.bits();
 
             let (parent_sock, child_sock) = rustix::net::socketpair(
@@ -119,10 +111,7 @@ impl DeviceWriter for DarwinInterface {
                 FlashError::FilesystemError(format!("failed to create socketpair: {e}"))
             })?;
 
-            // authopen lives at /usr/libexec/authopen on every macOS release.
-            // Relying on PATH is unreliable in sandboxed / GUI-launched processes
-            // and produces ENOENT (os error 2) when PATH doesn't include
-            // /usr/libexec.
+            // authopen lives at /usr/libexec/authopen
             let mut child = std::process::Command::new("/usr/libexec/authopen")
                 .args(["-stdoutpipe", "-o", &open_flags.to_string(), &raw_path])
                 .stdout(std::process::Stdio::from(child_sock))
@@ -138,7 +127,6 @@ impl DeviceWriter for DarwinInterface {
             // though we received a valid fd, owned_fd is dropped (closed) here.
             let status = child.wait().map_err(FlashError::Io)?;
             if !status.success() {
-                // owned_fd dropped and closed automatically — no libc::close needed.
                 return Err(FlashError::FilesystemError(format!(
                     "authopen exited with {status} while opening {raw_path}"
                 )));
@@ -148,7 +136,6 @@ impl DeviceWriter for DarwinInterface {
             fcntl_setfd(&owned_fd, FdFlags::CLOEXEC)
                 .map_err(|e| FlashError::Io(std::io::Error::from(e)))?;
 
-            // Safe conversion: OwnedFd is a fully configured, exclusively owned fd.
             Ok(std::fs::File::from(owned_fd))
         })
         .await
@@ -188,6 +175,7 @@ impl DeviceEnumerator for DarwinInterface {
             for disk_val in whole_disks {
                 if let Some(disk_str) = disk_val.as_string() {
                     // Ignore disk images/synthetics, query real attributes for individual whole disks
+                    // and removable devices
                     if let Ok(device) = fetch_disk_info(disk_str).await
                         && device.is_removable
                     {
