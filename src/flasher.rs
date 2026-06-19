@@ -51,6 +51,7 @@ where
     where
         T::Handle: RawWriteHandle,
     {
+        info!("Flasher start: {:?}", &device);
         on_progress
             .send(FlashProgress::create(FlashPhase::CheckingHash))
             .map_err(|_| FlashError::SendChannelError)?;
@@ -98,6 +99,8 @@ where
                     return Err(FlashError::Sha256HashDoesNotMatch(
                         HashFailedWhen::FirstCheck,
                     ));
+                } else {
+                    info!("Flasher: First Hash was correct");
                 }
             }
             source_of_image.file = buff_reader.into_inner();
@@ -114,6 +117,7 @@ where
         self.interface.unmount(device).await?;
 
         let mut handle_target_write_to = self.interface.open_for_writing(device).await?;
+        info!("Flasher: file opened worked");
         let total_bytes = source_of_image.uncompressed_size();
         let file_size = handle_target_write_to.size_bytes()?;
         if source_of_image.uncompressed_size() > file_size {
@@ -123,6 +127,7 @@ where
             ));
         }
         Self::wipe_partition_table(&mut handle_target_write_to).await?;
+        info!("Flasher: wipe worked");
 
         source_of_image
             .file
@@ -198,7 +203,7 @@ where
         on_progress
             .send(FlashProgress::create(FlashPhase::Verifying))
             .map_err(|_| FlashError::SendChannelError)?;
-        info!("Verifyer started");
+        info!("Flasher: verifyer started");
         let sender = self
             .verify(
                 &mut handle_target_write_to,
