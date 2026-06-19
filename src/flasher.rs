@@ -213,7 +213,7 @@ where
             )
             .await?;
 
-        info!("Verifyer finished");
+        info!("Verifyer finished, second hash correct");
         // deactive it for windows, crashed makes no sense deactivate is a bit of extra on top not needed
         #[cfg(not(target_os = "windows"))]
         self.interface.eject(device).await?;
