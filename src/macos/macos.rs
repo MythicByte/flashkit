@@ -151,11 +151,6 @@ impl DeviceWriter for DarwinInterface {
             fcntl_setfd(&owned_fd, FdFlags::CLOEXEC)
                 .map_err(|e| FlashError::Io(std::io::Error::from(e)))?;
 
-            //  F_NOCACHE: bypass the kernel unified buffer cache for this fd.
-            //    This is the macOS equivalent of Linux's O_DIRECT.  It must be
-            //    set post-open via fcntl — there is no open(2) flag equivalent.
-            fcntl_nocache(&owned_fd, true).map_err(|e| FlashError::Io(std::io::Error::from(e)))?;
-
             // Safe conversion: OwnedFd is a fully configured, exclusively owned fd.
             Ok(std::fs::File::from(owned_fd))
         })
