@@ -114,7 +114,7 @@ You may use this project under either license.
 
 ---
 ## Ki Transparency
-AI tools like Gemini and Claude were used when building and mostly debugging this application. Never has the AI made a commit or reviewed the code by itself.
+AI tools like Gemini and Claude were used when building and mostly debugging this application. **Never** has the AI made a commit or reviewed the code by itself.
 The application is mostly handwritten, and if something breaks or a question arises, an AI has helped. Writing documentation is one of the jobs, which was then reviewed.
 
 I really thank Gemini and Claude for gaslighting me on some problems. I couldn't even write the code with full automation using AI, as I only use the free plans(i will not do that).
